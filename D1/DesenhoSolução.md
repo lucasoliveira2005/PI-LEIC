@@ -1,67 +1,105 @@
-# Deliverable D1 – Desenho de Solução
+# Deliverable D1 - Desenho de Solucao
 
 ## 1. Casos de Uso
 
-### Caso de Uso 1 – Consulta de Métricas
+### Caso de Uso 1 - Consulta de Métricas
 
-- Utilizador: Operador/engenheiro de rede
+- Utilizador: Operador/Engenheiro de rede.
+- Objetivo: Obter uma resposta em linguagem natural sobre o estado atual da rede com base nas metricas recolhidas.
+- Pré-condição: O sistema de recolha de metricas do gNB/UE esta ativo.
+- Fluxo principal:
+	1. O operador envia uma pergunta (ex.: "qual a latência média da célula X nos últimos 5 minutos?").
+	2. O módulo de processamento consulta as métricas relevantes.
+	3. O módulo LLM interpreta a pergunta e sintetiza a resposta.
+	4. A UI/API devolve a resposta ao operador.
+- Resultado esperado: Resposta clara, contextualizada e com referência temporal.
 
-- Objetivo: Perguntar ao agente sobre métricas específicas da rede.
+### Caso de Uso 2 - Monitorização de Qualidade de Serviço (QoS)
 
- - Operador faz uma pergunta → Agente lê métricas JSON → LLM interpreta → Retorna resposta em linguagem natural.
+- Utilizador: Operador de rede.
+- Objetivo: Ser notificado automaticamente sobre degradação de QoS em células específicas.
+- Pré-condicao: Limiares de alerta e regras de anomalia configurados.
+- Fluxo principal:
+	1. O sistema recolhe continuamente métricas (latência, throughput, BLER, PRB, etc.).
+	2. O módulo de processamento aplica regras/algoritmos de deteção de anomalias.
+	3. Quando uma condicao de alerta é detetada, um evento é gerado.
+	4. A UI/API apresenta regista estes eventos.
+- Resultado esperado: Deteção proativa de problemas e redução de tempo de resposta operacional.
 
-### Caso de Uso 2 – Monitorização de Qualidade de Serviço (QoS)
+### Caso de Uso 3 - Otimização de Recursos e Manipulação da Rede
 
-- Utilizador: Operador de rede
+- Utilizador: Operador (com apoio do Agente AI).
+- Objetivo: Permitir instruções em linguagem natural para sugerir ou aplicar ajustes em parâmetros da rede.
+- Pré-condição: Politicas de seguranca e níveis de permissão definidos.
+- Fluxo principal:
+	1. O operador envia uma instrução (ex.: "reduzir potência da célula X em 2 dB").
+	2. O agente interpreta a instrução e mapeia para uma ação possível.
+	3. O sistema executa a ação (ou apresenta sugestão para aprovação).
+	4. A UI/API devolve confirmação e o resumo da alteração.
+- Resultado esperado: Otimização mais rápida, com rastreabilidade e controlo humano.
 
-- Objetivo: Receber alertas sobre degradação da qualidade do serviço em células específicas.
+## 2. Arquitetura do Sistema (Alto Nivel)
 
-- Fluxo resumido: Coleta de métricas → Processamento por parte do agente → Detecção de anomalias → Alertas/relatórios.
+O sistema é organizado em três camadas: Dados, Processamento e Interface. A camada de Dados integra-se com srsRAN para recolher métricas de gNB e UE em tempo (quase) real e publica essas metricas via ZMQ. A camada de Processamento recebe, normaliza e agrega os dados, executa deteção de anomalias e permite a interpretação de comandos/ações com apoio do LLM.
 
-### Caso de Uso 3 – Otimização de Recursos e Manipulação da Rede
-
-- Utilizador: Operador / Agente AI
-
-- Objetivo: Permitir que o operador envie instruções em linguagem natural e o agente sugira ou aplique alterações nos parâmetros da rede.
-
-- Fluxo resumido: Operador envia prompt → Agente interpreta instrução → Mapeia para parâmetros da célula/UE → Aplica ajustes ou envia sugestões ao módulo de controle → Operador recebe confirmação ou relatório da alteração.
-
-
-## 2. Arquitetura do Sistema (Alto Nível)
-
-O sistema é organizado em três camadas principais, que definem o fluxo global de dados e interação com o agente LLM:
-
-A camada de **Dados** captura métricas do gNB e UE (latência, throughput, uso de recursos) usando srsRAN e envia via ZMQ (ZeroMQ) para a camada de Processamento.
-
-A camada de **Processamento** armazena, normaliza e agrega métricas. Interpreta os dados e os prompts do utilizador.
-
-A camada de **User Interface** mostra dashboards para visualização de métricas, API REST para consultas e eventual integração com outros sistemas, e permite interagir com o agente LLM via prompts ou comandos estruturados.
+A camada de Interface disponibiliza 'dashboards' permitindo uma melhor visualização, endpoints REST para integração externa e um canal de através do qual o utilizador poderá interagir em linguagem natural com o agente. Esta separação irá permitir escalabilidade (processamento desacoplado da captura), manutenção mais simples e evolução independente de cada componente.
 
 **Diagrama de Componentes:**
-[COLOCAR AQUI O DIAGRAMA]
-+----------------+       +----------------+       +----------------+
-| Coleta de Dados| --->  | Processamento  | --->  | Interface / UI |
-|  (srsRAN gNB)  |       |  e AI          |       |  Dashboards &  |
-| Metrics Agent  |       |  Engine        |       |  APIs          |
-+----------------+       +----------------+       +----------------+
+![Diagrama de Componentes](diagrama-componentes.png)
 
 
-## 3. Componentes Individuais
+## 3. Componentes Individuais (Resumo + Tecnologias)
 
-| Componente          | Função                                                     | Tecnologias                                     |
-| ------------------- | ---------------------------------------------------------- | ----------------------------------------------- |
-| **Dados**   | Capturar métricas do gNB e UE (latência, throughput, uso de recursos) e enviar para o módulo de processamento              | Python, srsRAN, ZMQ                        |
-| **Processamento** | Armazenar e normalizar dados, interpretar métricas e gerar estatísticas via LLM, e sugerir ou aplicar ajustes em parâmetros da rede | SQLite, PostgreSQL/InfluxDB, Python, LLM open-source (GPT4All, LLaMA), TensorFlow/PyTorch |
-| **User Interface**  | Fornecer dashboards interativos para visualização e APIs REST para consultas e prompts ao agente      | React.js, Flask/FastAPI, Grafana                |
+O componente de Dados é responsável por recolher telemetria da RAN (gNB/UE), garantir formato consistente de eventos e encaminhar as mensagens para processamento com baixa latencia. O componente de Processamento é onde os dados serão armazenados e onde o modulo LLM irá transformar perguntas em consultas operacionais e gerar respostas/sugestões. Finalmente, o componente de UI irá exibir estes resultados e será através dele que o operador irá interagir com o sistema.
 
 
-## 4. Interação entre Componentes
+| Componente | Funcao Principal | Tecnologias Sugeridas |
+| --- | --- | --- |
+| **Dados** | Captura de metricas do gNB/UE, serializacao e publicacao de eventos | Python, srsRAN, ZMQ |
+| **Processamento** | Ingestao, normalizacao, armazenamento, analitica, deteccao de anomalias, apoio LLM | Python, FastAPI (servico), SQLite/PostgreSQL/InfluxDB, LLM open-source (LLaMA/GPT4All), TensorFlow/PyTorch (opcional) |
+| **Interface** | Dashboards, alertas, consulta via API e interacao com operador | React.js, Grafana, FastAPI/Flask |
+
+## 4. Interação entre Componentes e Especificação de Interfaces
+
 **Diagrama de Sequência:**
-[COLOCAR AQUI O DIAGRAMA]
+![Diagrama de Sequencia](diagrama-sequencia.png)
 
-Metrics Agent --> Processing Engine : envia métricas
+### 4.1 Fluxo de Interacao (alto nivel)
 
-AI Module --> Processing Engine     : envia decisões/ações
-Processing Engine --> UI / API      : disponibiliza dados e alertas
+1. Metrics Agent envia eventos e métricas para o Processing Engine.
+2. Processing Engine valida e armazena os dados.
+3. AI Module consulta dados agregados e produz inferências/recomendações.
+4. UI/API consulta o Processing Engine para mostrar métricas, alertas e respostas ao operador.
+5. Operador pode enviar comandos; o Processing Engine valida e ativa ações no módulo de controlo da rede.
 
-UI / API --> Operador               : apresenta dashboards / alertas
+### 4.2 Interfaces entre Componentes
+
+**Dados -> Processamento (ZMQ / JSON)**
+
+- Métricas disponibilizadas:
+	- `timestamp`
+	- `cell_id`
+	- `ue_id` (quando aplicável)
+	- `latency_ms`, `throughput_mbps`, `prb_usage_pct`, `bler_pct`, `rsrp_dbm`
+	- `event_type` (metric, alarm, state)
+- Dados aceites pelo Processamento:
+	- Mensagens JSON com schema versionado (`schema_version`).
+
+**Processamento <-> AI Module (API interna)**
+
+- Dados disponibilizados pelo Processamento:
+	- Séries temporais agregadas por celula/UE.
+	- Estado de alarmes e baseline histórico.
+- Dados aceites pelo AI Module:
+	- Interpretação de query do operador.
+	- Recomendações de ajuste (`parameter`, `old_value`, `new_value`, `confidence`).
+
+**Processamento -> UI/API (REST/JSON)**
+
+- Endpoints sugeridos:
+	- `GET /metrics?cell_id=&from=&to=`
+	- `GET /alerts?status=open`
+	- `POST /query` (pergunta em linguagem natural)
+	- `POST /actions` (pedido de alteração de um parâmetro)
+- Dados disponibilizados:
+	- Métricas atuais e históricas, alertas, recomendações, estado de execução de ações.
