@@ -1,0 +1,27 @@
+@startuml
+skinparam componentStyle rectangle
+
+package "Camada de Dados" {
+  [Metrics Agent\n(srsRAN gNB/UE)] as DA
+}
+
+package "Camada de Processamento" {
+  [Processing Engine] as PE
+  [AI Module] as AI
+  database "DB Time-Series/Relacional" as DB
+}
+
+package "Camada de Interface" {
+  [UI Dashboard] as UI
+  [API REST] as API
+  actor Operador as OP
+}
+
+DA --> PE : ZMQ/JSON metricas
+PE --> DB : persistencia/consulta
+AI --> PE : recomendacoes e interpretacao
+PE --> API : dados, alertas, respostas
+API --> UI : payload para visualizacao
+OP --> UI : consultas/comandos
+
+@enduml

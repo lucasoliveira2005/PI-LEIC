@@ -1,0 +1,20 @@
+@startuml
+actor Operador
+participant "UI/API" as UI
+participant "Processing Engine" as PE
+participant "AI Module" as AI
+participant "Metrics Agent" as MA
+database "DB" as DB
+
+MA -> PE : Envia metricas (ZMQ/JSON)
+PE -> DB : Valida e persiste
+
+Operador -> UI : Pergunta/Comando em linguagem natural
+UI -> PE : POST /query ou POST /actions
+PE -> AI : Contexto + dados agregados
+AI --> PE : Resposta/recomendacao
+
+PE -> DB : Regista evento e auditoria
+PE --> UI : Resultado + estado da acao
+UI --> Operador : Dashboard/alerta/confirmacao
+@enduml
