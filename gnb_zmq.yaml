@@ -1,0 +1,69 @@
+# srsRAN Project gNB config for ZMQ + srsUE (FDD band 3, 15 kHz SCS)
+# srsUE only supports 15 kHz SCS → FDD bands only
+
+cu_cp:
+  amf:
+    addr: 127.0.0.5
+    port: 38412
+    bind_addr: 127.0.0.1
+    supported_tracking_areas:
+      - tac: 1
+        plmn_list:
+          - plmn: "99970"
+            tai_slice_support_list:
+              - sst: 1
+                sd: "000000"
+  inactivity_timer: 7200
+
+ru_sdr:
+  device_driver: zmq
+  device_args: tx_port=tcp://127.0.0.1:2000,rx_port=tcp://127.0.0.1:2001,base_srate=23.04e6
+  srate: 23.04
+  tx_gain: 75
+  rx_gain: 75
+
+cell_cfg:
+  dl_arfcn: 368500                  # ARFCN of the downlink carrier (center frequency).
+  band: 3                           # FDD band (required for srsUE, which only supports 15 kHz SCS).
+  channel_bandwidth_MHz: 20         # Bandwidth in MHz. Number of PRBs will be automatically derived.
+  common_scs: 15                    # Subcarrier spacing in kHz used for data (must be 15 for srsUE).
+  plmn: "99970"
+  tac: 1
+  pdcch:
+    common:
+      ss0_index: 0                  # Set search space zero index to match srsUE capabilities
+      coreset0_index: 12            # Set CORESET Zero index to match srsUE capabilities
+    dedicated:
+      ss2_type: common              # Search Space type, has to be set to common
+      dci_format_0_1_and_1_1: false # Set correct DCI format (fallback)
+  prach:
+    prach_config_index: 1           # Sets PRACH config to match what is expected by srsUE
+  pdsch:
+    mcs_table: qam64                # Sets PDSCH MCS to 64 QAM
+  pusch:
+    mcs_table: qam64                # Sets PUSCH MCS to 64 QAM
+
+log:
+  filename: /tmp/gnb.log
+  all_level: info
+  hex_max_size: 0
+
+pcap:
+  mac_enable: false
+  mac_filename: /tmp/gnb_mac.pcap
+  ngap_enable: false
+  ngap_filename: /tmp/gnb_ngap.pcap
+
+remote_control:
+  bind_addr: 127.0.0.1
+  port: 55555
+  enabled: true
+
+metrics:
+  enable_json: true
+  layers:
+    enable_mac: true
+    enable_rlc: true
+    enable_du_low: true
+  periodicity:
+    du_report_period: 1000
