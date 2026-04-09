@@ -1,2 +1,7 @@
 /metrics/*
 !/metrics/.gitkeep
+src/.venv/
+src/__pycache__/
+*.pyc
+src/srsRAN_Project/
+.codex

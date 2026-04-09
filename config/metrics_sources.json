@@ -1,0 +1,12 @@
+[
+  {
+    "source_id": "gnb1",
+    "gnb_id": "gnb1",
+    "ws_url": "ws://127.0.0.1:55551"
+  },
+  {
+    "source_id": "gnb2",
+    "gnb_id": "gnb2",
+    "ws_url": "ws://127.0.0.1:55552"
+  }
+]
