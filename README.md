@@ -38,7 +38,7 @@ Before running the stack, make sure the machine has:
 If `gnb` is not installed system-wide, export the binary path before launching:
 
 ```bash
-export GNB_BIN=/home/filipecamacho/open5gs/srsRAN_Project/build/apps/gnb/gnb
+export GNB_BIN=/path/to/srsRAN_Project/build/apps/gnb/gnb
 ```
 
 ## Python Setup
@@ -46,7 +46,7 @@ export GNB_BIN=/home/filipecamacho/open5gs/srsRAN_Project/build/apps/gnb/gnb
 Use one supported Python flow for every local Python tool in this repository:
 
 ```bash
-cd /home/filipecamacho/Desktop/FEUP/PI-LEIC
+cd /path/to/PI-LEIC
 python3 -m venv src/.venv
 source src/.venv/bin/activate
 python -m pip install -r requirements.txt
@@ -69,7 +69,7 @@ The versioned subscriber source of truth for this stage is:
 Preview the planned Open5GS subscriber changes first:
 
 ```bash
-cd /home/filipecamacho/Desktop/FEUP/PI-LEIC
+cd /path/to/PI-LEIC
 source src/.venv/bin/activate
 python src/provision_subscribers.py
 ```
@@ -77,7 +77,7 @@ python src/provision_subscribers.py
 Apply them when the preview looks correct:
 
 ```bash
-cd /home/filipecamacho/Desktop/FEUP/PI-LEIC
+cd /path/to/PI-LEIC
 source src/.venv/bin/activate
 python src/provision_subscribers.py --apply
 ```
@@ -93,7 +93,7 @@ python src/provision_subscribers.py --apply --only ue2
 The recommended flow for this stage is:
 
 ```bash
-cd /home/filipecamacho/Desktop/FEUP/PI-LEIC
+cd /path/to/PI-LEIC
 source src/.venv/bin/activate
 python src/provision_subscribers.py --apply
 bash src/launch_stack.sh
@@ -122,7 +122,7 @@ bash src/launch_stack.sh --dry-run
 Use this to replay the full milestone validation against fresh metrics from the current run only:
 
 ```bash
-cd /home/filipecamacho/Desktop/FEUP/PI-LEIC
+cd /path/to/PI-LEIC
 bash src/validate_stage.sh
 ```
 
@@ -147,7 +147,7 @@ Use this when debugging one component at a time.
 1. Provision the subscribers:
 
 ```bash
-cd /home/filipecamacho/Desktop/FEUP/PI-LEIC
+cd /path/to/PI-LEIC
 source src/.venv/bin/activate
 python src/provision_subscribers.py --apply
 ```
@@ -161,14 +161,14 @@ sudo tail -f /var/log/open5gs/amf.log
 3. Start `gNB1`:
 
 ```bash
-cd /home/filipecamacho/Desktop/FEUP/PI-LEIC
+cd /path/to/PI-LEIC
 sudo "${GNB_BIN:-gnb}" -c config/gnb_gnb1_zmq.yaml
 ```
 
 4. Start `gNB2`:
 
 ```bash
-cd /home/filipecamacho/Desktop/FEUP/PI-LEIC
+cd /path/to/PI-LEIC
 sudo "${GNB_BIN:-gnb}" -c config/gnb_gnb2_zmq.yaml
 ```
 
@@ -184,21 +184,21 @@ sudo ip netns add ue2
 6. Start `UE1`:
 
 ```bash
-cd /home/filipecamacho/Desktop/FEUP/PI-LEIC
+cd /path/to/PI-LEIC
 sudo srsue config/ue1_zmq.conf.txt
 ```
 
 7. Start `UE2`:
 
 ```bash
-cd /home/filipecamacho/Desktop/FEUP/PI-LEIC
+cd /path/to/PI-LEIC
 sudo srsue config/ue2_zmq.conf.txt
 ```
 
 8. Start the central metrics collector:
 
 ```bash
-cd /home/filipecamacho/Desktop/FEUP/PI-LEIC
+cd /path/to/PI-LEIC
 source src/.venv/bin/activate
 export METRICS_SOURCES_CONFIG=config/metrics_sources.json
 export METRICS_OUT=metrics/gnb_metrics.jsonl
@@ -208,7 +208,7 @@ python src/metrics_collector.py
 9. Start the dashboard:
 
 ```bash
-cd /home/filipecamacho/Desktop/FEUP/PI-LEIC
+cd /path/to/PI-LEIC
 source src/.venv/bin/activate
 export METRICS_OUT=metrics/gnb_metrics.jsonl
 export MPLCONFIGDIR=/tmp/pi-leic-matplotlib
