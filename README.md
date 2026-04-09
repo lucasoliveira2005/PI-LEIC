@@ -112,6 +112,7 @@ bash src/launch_stack.sh
 - launches the central metrics collector as a user service
 - optionally launches the dashboard
 - runs readiness checks after the supervised stack has actually started
+- waits for each UE namespace to gain tunnel IPv4 and a default route
 - verifies that the required supervised units are actually active before reporting ready
 
 The default supervised mode is the recommended path for repeatable runs and automation.
@@ -154,7 +155,7 @@ It will:
 - confirm fresh `source_id` entries for every configured source in `metrics/gnb_metrics.jsonl`
 - confirm fresh non-zero `dl_brate` and `ul_brate` for every configured source
 
-This is the authoritative end-to-end validation flow. By default it launches the stack in supervised mode, enables strict launch readiness checks, disables the dashboard, and validates after real traffic has been generated. If a stale manual run is still holding ZMQ or NG-U ports, the launcher now cleans up the old PI-LEIC lab processes before starting the supervised units.
+This is the authoritative end-to-end validation flow. By default it launches the stack in supervised mode, enables strict launch readiness checks, disables the dashboard, waits for each UE namespace to gain a usable route, and validates after real traffic has been generated. If a stale manual run is still holding ZMQ or NG-U ports, the launcher now cleans up the old PI-LEIC lab processes before starting the supervised units.
 
 If you already have part of the stack running, you can skip steps:
 

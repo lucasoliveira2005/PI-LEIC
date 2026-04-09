@@ -10,6 +10,8 @@ METRICS_SOURCES_CONFIG="${METRICS_SOURCES_CONFIG:-$REPO_ROOT/config/metrics_sour
 PING_TARGET="${PING_TARGET:-10.45.0.1}"
 PING_COUNT="${PING_COUNT:-4}"
 PING_WAIT_SECONDS="${PING_WAIT_SECONDS:-3}"
+NET_READY_TIMEOUT_SECONDS="${NET_READY_TIMEOUT_SECONDS:-30}"
+NET_READY_POLL_SECONDS="${NET_READY_POLL_SECONDS:-1}"
 UE_NAMESPACES_RAW="${UE_NAMESPACES:-ue1:ue2}"
 LAUNCH_MODE="${LAUNCH_MODE:-supervised}"
 LAUNCH_DASHBOARD_ENABLED="${LAUNCH_DASHBOARD_ENABLED:-0}"
@@ -39,7 +41,8 @@ Options:
 
 Environment overrides:
   PYTHON_BIN, METRICS_OUT, METRICS_SOURCES_CONFIG, PING_TARGET, PING_COUNT
-  PING_WAIT_SECONDS, UE_NAMESPACES, LAUNCH_MODE, LAUNCH_DASHBOARD_ENABLED
+  PING_WAIT_SECONDS, NET_READY_TIMEOUT_SECONDS, NET_READY_POLL_SECONDS
+  UE_NAMESPACES, LAUNCH_MODE, LAUNCH_DASHBOARD_ENABLED
   LAUNCH_HEALTHCHECK_ENABLED, LAUNCH_HEALTHCHECK_STRICT
 
 Notes:
@@ -50,6 +53,7 @@ Notes:
   after the supervised stack has had a chance to attach.
   Those launch readiness checks run in strict mode here, so validation stops early
   if the supervised stack never becomes ready.
+  Before pinging, this script also waits for a usable route inside each UE namespace.
   This script still performs the stricter validation after traffic generation.
 EOF
 }
@@ -189,6 +193,40 @@ print("Fresh non-zero dl_brate and ul_brate confirmed for: " + ", ".join(require
 PY
 }
 
+netns_route_ready() {
+  local netns_name="$1"
+  sudo ip netns exec "$netns_name" ip route get "$PING_TARGET" >/dev/null 2>&1
+}
+
+show_netns_debug() {
+  local netns_name="$1"
+
+  echo "Namespace ${netns_name} addresses:"
+  sudo ip netns exec "$netns_name" ip addr || true
+  echo "Namespace ${netns_name} routes:"
+  sudo ip netns exec "$netns_name" ip route || true
+}
+
+wait_for_netns_route() {
+  local netns_name="$1"
+  local deadline=$((SECONDS + NET_READY_TIMEOUT_SECONDS))
+
+  echo "Waiting up to ${NET_READY_TIMEOUT_SECONDS}s for ${netns_name} to gain a route to ${PING_TARGET}..."
+
+  while (( SECONDS < deadline )); do
+    if netns_route_ready "$netns_name"; then
+      echo "${netns_name} route to ${PING_TARGET} is ready."
+      return 0
+    fi
+
+    sleep "$NET_READY_POLL_SECONDS"
+  done
+
+  echo "${netns_name} never gained a route to ${PING_TARGET}." >&2
+  show_netns_debug "$netns_name" >&2
+  return 1
+}
+
 require_command "$PYTHON_BIN"
 require_command sudo
 require_command ip
@@ -225,6 +263,7 @@ fi
 
 if [[ "$SKIP_PING" != "1" ]]; then
   for netns_name in "${UE_NAMESPACES[@]}"; do
+    wait_for_netns_route "$netns_name"
     echo "Sending traffic from ${netns_name} to ${PING_TARGET}..."
     sudo ip netns exec "$netns_name" ping -c "$PING_COUNT" "$PING_TARGET"
   done

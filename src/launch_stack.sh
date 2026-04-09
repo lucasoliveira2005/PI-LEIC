@@ -235,6 +235,18 @@ read_netns() {
   ' "$config_path"
 }
 
+read_ip_devname() {
+  local config_path="$1"
+
+  awk -F '=' '
+    /^[[:space:]]*ip_devname[[:space:]]*=/ {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+      print $2
+      exit
+    }
+  ' "$config_path"
+}
+
 config_label() {
   local label
 
@@ -278,6 +290,21 @@ metrics_line_count() {
 netns_exists() {
   local netns_name="$1"
   ip netns list | awk '{print $1}' | grep -Fx "$netns_name" >/dev/null 2>&1
+}
+
+netns_device_has_ipv4() {
+  local netns_name="$1"
+  local device_name="$2"
+
+  [[ -n "$device_name" ]] || return 1
+  sudo -n ip netns exec "$netns_name" ip -4 -o addr show dev "$device_name" scope global \
+    | grep -q .
+}
+
+netns_has_default_route() {
+  local netns_name="$1"
+
+  sudo -n ip netns exec "$netns_name" ip route show default | grep -q .
 }
 
 metrics_source_seen_since() {
@@ -540,10 +567,13 @@ run_health_checks() {
   local -a missing_sources=()
   local -a missing_attach=()
   local -a missing_netns=()
+  local -a missing_netdev_ipv4=()
+  local -a missing_default_routes=()
   local -a inactive_root_units=()
   local -a inactive_user_units=()
   local source_id
   local ue_netns
+  local ue_device
   local unit
 
   if [[ "$HEALTHCHECK_ENABLED" != "1" ]]; then
@@ -556,6 +586,8 @@ run_health_checks() {
     missing_sources=()
     missing_attach=()
     missing_netns=()
+    missing_netdev_ipv4=()
+    missing_default_routes=()
     inactive_root_units=()
     inactive_user_units=()
 
@@ -571,6 +603,15 @@ run_health_checks() {
     for ue_netns in "${UE_NETNS_LIST[@]}"; do
       if ! netns_exists "$ue_netns"; then
         missing_netns+=("$ue_netns")
+        continue
+      fi
+
+      ue_device="${UE_NETNS_DEVICE_MAP[$ue_netns]:-}"
+      if ! netns_device_has_ipv4 "$ue_netns" "$ue_device"; then
+        missing_netdev_ipv4+=("${ue_netns}:${ue_device}")
+      fi
+      if ! netns_has_default_route "$ue_netns"; then
+        missing_default_routes+=("$ue_netns")
       fi
     done
 
@@ -586,11 +627,12 @@ run_health_checks() {
       fi
     done
 
-    if [[ ${#missing_sources[@]} -eq 0 && ${#missing_attach[@]} -eq 0 && ${#missing_netns[@]} -eq 0 && ${#inactive_root_units[@]} -eq 0 && ${#inactive_user_units[@]} -eq 0 ]]; then
+    if [[ ${#missing_sources[@]} -eq 0 && ${#missing_attach[@]} -eq 0 && ${#missing_netns[@]} -eq 0 && ${#missing_netdev_ipv4[@]} -eq 0 && ${#missing_default_routes[@]} -eq 0 && ${#inactive_root_units[@]} -eq 0 && ${#inactive_user_units[@]} -eq 0 ]]; then
       echo "Launch readiness checks passed."
       echo "Fresh metrics observed from: $(join_by ', ' "${METRICS_SOURCE_IDS[@]}")"
       echo "UE namespaces present: $(join_by ', ' "${UE_NETNS_LIST[@]}")"
       echo "Attach-like cells metrics observed from: $(join_by ', ' "${METRICS_SOURCE_IDS[@]}")"
+      echo "UE namespace data path ready: $(join_by ', ' "${UE_NETNS_LIST[@]}")"
       if [[ ${#HEALTHCHECK_ROOT_UNITS[@]} -gt 0 ]]; then
         echo "Required supervised root units active: $(join_by ', ' "${HEALTHCHECK_ROOT_UNITS[@]}")"
       fi
@@ -612,6 +654,12 @@ run_health_checks() {
   fi
   if [[ ${#missing_netns[@]} -gt 0 ]]; then
     echo "Missing UE namespaces: $(join_by ', ' "${missing_netns[@]}")"
+  fi
+  if [[ ${#missing_netdev_ipv4[@]} -gt 0 ]]; then
+    echo "UE namespaces missing IPv4 on configured tunnel device: $(join_by ', ' "${missing_netdev_ipv4[@]}")"
+  fi
+  if [[ ${#missing_default_routes[@]} -gt 0 ]]; then
+    echo "UE namespaces missing default route: $(join_by ', ' "${missing_default_routes[@]}")"
   fi
   if [[ ${#inactive_root_units[@]} -gt 0 ]]; then
     echo "Inactive or missing supervised root units: $(join_by ', ' "${inactive_root_units[@]}")"
@@ -977,6 +1025,7 @@ require_command sudo
 require_command systemctl
 require_command systemd-run
 require_command ps
+require_command ip
 
 if [[ ! -d "$WORKDIR" ]]; then
   echo "Workdir does not exist: $WORKDIR" >&2
@@ -1038,6 +1087,7 @@ USER_UNIT_NAMES=(
 )
 HEALTHCHECK_ROOT_UNITS=()
 HEALTHCHECK_USER_UNITS=()
+declare -A UE_NETNS_DEVICE_MAP=()
 declare -A COMPONENT_ROOT_UNITS=()
 COMPONENT_KEYS=()
 
@@ -1053,14 +1103,20 @@ for ue_config in "${UE_CONFIG_PATHS[@]}"; do
   ue_label="$(config_label "$ue_config")"
   ue_unit="$(root_unit_name "ue-$ue_label")"
   ue_netns="$(read_netns "$ue_config")"
+  ue_device="$(read_ip_devname "$ue_config")"
   if [[ -z "$ue_netns" ]]; then
     echo "Could not determine netns from UE config: $ue_config" >&2
+    exit 1
+  fi
+  if [[ -z "$ue_device" ]]; then
+    echo "Could not determine ip_devname from UE config: $ue_config" >&2
     exit 1
   fi
   ROOT_UNIT_NAMES+=("$ue_unit")
   COMPONENT_ROOT_UNITS["$ue_label"]="$ue_unit"
   COMPONENT_KEYS+=("$ue_label")
   UE_NETNS_LIST+=("$ue_netns")
+  UE_NETNS_DEVICE_MAP["$ue_netns"]="$ue_device"
 done
 
 if [[ "$MODE" != "supervised" && "$MODE" != "terminals" ]]; then
