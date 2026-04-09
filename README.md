@@ -109,7 +109,9 @@ bash src/launch_stack.sh
 - launches `UE2`
 - launches the central metrics collector
 - launches the dashboard
-- runs a post-launch health check that looks for fresh metrics from each source and confirms the UE namespaces exist
+- runs a best-effort post-launch smoke check
+
+That smoke check runs immediately after the terminals open, so in interactive runs it may warn while those terminals are still waiting for sudo input. Treat it as an early hint, not as the final verdict.
 
 If you want to inspect what it will do without opening terminals:
 
@@ -133,6 +135,8 @@ It will:
 - send traffic from `ue1` and `ue2` to `10.45.0.1`
 - confirm fresh `source_id` entries for every configured source in `metrics/gnb_metrics.jsonl`
 - confirm fresh non-zero `dl_brate` and `ul_brate` for every configured source
+
+This is the authoritative end-to-end validation flow. By default it disables the launcher's early smoke check and validates after real traffic has been generated.
 
 If you already have part of the stack running, you can skip steps:
 

@@ -57,6 +57,8 @@ Environment overrides:
 
 Notes:
   GNB_CONFIGS and UE_CONFIGS use colon-separated paths.
+  The post-launch health check is a best-effort smoke check for interactive runs.
+  It may warn while newly opened terminals are still waiting for sudo input.
 EOF
 }
 
@@ -218,7 +220,8 @@ run_health_checks() {
     return 0
   fi
 
-  echo "Running post-launch health checks for up to ${HEALTHCHECK_TIMEOUT_SECONDS}s..."
+  echo "Running best-effort post-launch smoke checks for up to ${HEALTHCHECK_TIMEOUT_SECONDS}s..."
+  echo "These checks run immediately after the terminals open and may warn while those terminals are still waiting for sudo input."
 
   while (( SECONDS < deadline )); do
     missing_sources=()
@@ -252,6 +255,7 @@ run_health_checks() {
   done
 
   echo "Health check completed with warnings."
+  echo "These warnings are not definitive failures in interactive mode."
   if [[ ${#missing_sources[@]} -gt 0 ]]; then
     echo "No fresh metrics observed from: $(join_by ', ' "${missing_sources[@]}")"
   fi
@@ -261,6 +265,7 @@ run_health_checks() {
   if [[ ${#missing_netns[@]} -gt 0 ]]; then
     echo "Missing UE namespaces: $(join_by ', ' "${missing_netns[@]}")"
   fi
+  echo "Use src/validate_stage.sh for the stricter end-to-end validation after traffic is generated."
   echo "Inspect the corresponding gNB, UE, and Metrics Collector terminals if these warnings persist."
 }
 

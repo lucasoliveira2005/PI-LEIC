@@ -11,6 +11,7 @@ PING_TARGET="${PING_TARGET:-10.45.0.1}"
 PING_COUNT="${PING_COUNT:-4}"
 PING_WAIT_SECONDS="${PING_WAIT_SECONDS:-3}"
 UE_NAMESPACES_RAW="${UE_NAMESPACES:-ue1:ue2}"
+LAUNCH_HEALTHCHECK_ENABLED="${LAUNCH_HEALTHCHECK_ENABLED:-0}"
 
 SKIP_PROVISION=0
 SKIP_LAUNCH=0
@@ -35,10 +36,12 @@ Options:
 
 Environment overrides:
   PYTHON_BIN, METRICS_OUT, METRICS_SOURCES_CONFIG, PING_TARGET, PING_COUNT
-  PING_WAIT_SECONDS, UE_NAMESPACES
+  PING_WAIT_SECONDS, UE_NAMESPACES, LAUNCH_HEALTHCHECK_ENABLED
 
 Notes:
   UE_NAMESPACES uses colon-separated names, for example: ue1:ue2
+  The launcher smoke check is disabled by default here because this script performs
+  the stricter validation after traffic generation.
 EOF
 }
 
@@ -205,7 +208,7 @@ fi
 
 if [[ "$SKIP_LAUNCH" != "1" ]]; then
   echo "Launching the full multi-gNB stage..."
-  bash src/launch_stack.sh
+  HEALTHCHECK_ENABLED="$LAUNCH_HEALTHCHECK_ENABLED" bash src/launch_stack.sh
 fi
 
 if [[ "$SKIP_PING" != "1" ]]; then
