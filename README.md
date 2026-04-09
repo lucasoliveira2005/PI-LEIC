@@ -117,6 +117,29 @@ If you want to inspect what it will do without opening terminals:
 bash src/launch_stack.sh --dry-run
 ```
 
+## Validation Run
+
+Use this to replay the full milestone validation against fresh metrics from the current run only:
+
+```bash
+cd /home/filipecamacho/Desktop/FEUP/PI-LEIC
+bash src/validate_stage.sh
+```
+
+It will:
+
+- apply `config/subscribers.json`
+- launch the full stack
+- send traffic from `ue1` and `ue2` to `10.45.0.1`
+- confirm fresh `source_id` entries for every configured source in `metrics/gnb_metrics.jsonl`
+- confirm fresh non-zero `dl_brate` and `ul_brate` for every configured source
+
+If you already have part of the stack running, you can skip steps:
+
+```bash
+bash src/validate_stage.sh --skip-provision --skip-launch
+```
+
 ## Manual Run
 
 Use this when debugging one component at a time.
