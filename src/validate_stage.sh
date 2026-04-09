@@ -11,7 +11,10 @@ PING_TARGET="${PING_TARGET:-10.45.0.1}"
 PING_COUNT="${PING_COUNT:-4}"
 PING_WAIT_SECONDS="${PING_WAIT_SECONDS:-3}"
 UE_NAMESPACES_RAW="${UE_NAMESPACES:-ue1:ue2}"
-LAUNCH_HEALTHCHECK_ENABLED="${LAUNCH_HEALTHCHECK_ENABLED:-0}"
+LAUNCH_MODE="${LAUNCH_MODE:-supervised}"
+LAUNCH_DASHBOARD_ENABLED="${LAUNCH_DASHBOARD_ENABLED:-0}"
+LAUNCH_HEALTHCHECK_ENABLED="${LAUNCH_HEALTHCHECK_ENABLED:-1}"
+LAUNCH_HEALTHCHECK_STRICT="${LAUNCH_HEALTHCHECK_STRICT:-1}"
 
 SKIP_PROVISION=0
 SKIP_LAUNCH=0
@@ -36,12 +39,18 @@ Options:
 
 Environment overrides:
   PYTHON_BIN, METRICS_OUT, METRICS_SOURCES_CONFIG, PING_TARGET, PING_COUNT
-  PING_WAIT_SECONDS, UE_NAMESPACES, LAUNCH_HEALTHCHECK_ENABLED
+  PING_WAIT_SECONDS, UE_NAMESPACES, LAUNCH_MODE, LAUNCH_DASHBOARD_ENABLED
+  LAUNCH_HEALTHCHECK_ENABLED, LAUNCH_HEALTHCHECK_STRICT
 
 Notes:
   UE_NAMESPACES uses colon-separated names, for example: ue1:ue2
-  The launcher smoke check is disabled by default here because this script performs
-  the stricter validation after traffic generation.
+  The launcher runs in supervised mode by default here.
+  The dashboard is disabled by default here because validation does not depend on it.
+  The launch readiness checks are enabled by default here so traffic starts only
+  after the supervised stack has had a chance to attach.
+  Those launch readiness checks run in strict mode here, so validation stops early
+  if the supervised stack never becomes ready.
+  This script still performs the stricter validation after traffic generation.
 EOF
 }
 
@@ -207,8 +216,11 @@ if [[ "$SKIP_PROVISION" != "1" ]]; then
 fi
 
 if [[ "$SKIP_LAUNCH" != "1" ]]; then
-  echo "Launching the full multi-gNB stage..."
-  HEALTHCHECK_ENABLED="$LAUNCH_HEALTHCHECK_ENABLED" bash src/launch_stack.sh
+  echo "Launching the full multi-gNB stage in ${LAUNCH_MODE} mode..."
+  DASHBOARD_ENABLED="$LAUNCH_DASHBOARD_ENABLED" \
+    HEALTHCHECK_ENABLED="$LAUNCH_HEALTHCHECK_ENABLED" \
+    HEALTHCHECK_STRICT="$LAUNCH_HEALTHCHECK_STRICT" \
+    bash src/launch_stack.sh --mode "$LAUNCH_MODE"
 fi
 
 if [[ "$SKIP_PING" != "1" ]]; then

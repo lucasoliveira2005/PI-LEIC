@@ -31,9 +31,10 @@ Before running the stack, make sure the machine has:
 
 - Open5GS installed and running
 - `mongosh` available locally
+- `systemd-run` available locally
 - `srsue` available on `PATH`
 - `gnb` from srsRAN Project available on `PATH`, or exported through `GNB_BIN`
-- a graphical terminal emulator such as `gnome-terminal`, `konsole`, `xterm`, or `x-terminal-emulator`
+- a graphical terminal emulator such as `gnome-terminal`, `konsole`, `xterm`, or `x-terminal-emulator` only if you want the fallback `--mode terminals`
 
 If `gnb` is not installed system-wide, export the binary path before launching:
 
@@ -101,22 +102,37 @@ bash src/launch_stack.sh
 
 `src/launch_stack.sh` is the main launcher for this stage. It:
 
-- restarts and tails the Open5GS core logs
-- launches `gNB1`
-- launches `gNB2`
-- creates `ue1` and `ue2` namespaces automatically
-- launches `UE1`
-- launches `UE2`
-- launches the central metrics collector
-- launches the dashboard
-- runs a best-effort post-launch smoke check
+- uses supervised mode by default
+- prompts for sudo once up front
+- restarts the Open5GS core services
+- launches `gNB1` and `gNB2` via `systemd-run`
+- creates `ue1` and `ue2` namespaces automatically before launching the UEs
+- launches `UE1` and `UE2` via `systemd-run`
+- launches the central metrics collector as a user service
+- optionally launches the dashboard
+- runs readiness checks after the supervised stack has actually started
 
-That smoke check runs immediately after the terminals open, so in interactive runs it may warn while those terminals are still waiting for sudo input. Treat it as an early hint, not as the final verdict.
+The default supervised mode is the recommended path for repeatable runs and automation.
 
 If you want to inspect what it will do without opening terminals:
 
 ```bash
 bash src/launch_stack.sh --dry-run
+```
+
+Useful supervised commands:
+
+```bash
+bash src/launch_stack.sh --status
+bash src/launch_stack.sh --logs collector
+bash src/launch_stack.sh --logs gnb1
+bash src/launch_stack.sh --stop
+```
+
+If you still want the older GUI-terminal workflow for manual debugging:
+
+```bash
+bash src/launch_stack.sh --mode terminals
 ```
 
 ## Validation Run
@@ -136,7 +152,7 @@ It will:
 - confirm fresh `source_id` entries for every configured source in `metrics/gnb_metrics.jsonl`
 - confirm fresh non-zero `dl_brate` and `ul_brate` for every configured source
 
-This is the authoritative end-to-end validation flow. By default it disables the launcher's early smoke check and validates after real traffic has been generated.
+This is the authoritative end-to-end validation flow. By default it launches the stack in supervised mode, enables strict launch readiness checks, disables the dashboard, and validates after real traffic has been generated.
 
 If you already have part of the stack running, you can skip steps:
 
