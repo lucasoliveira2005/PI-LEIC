@@ -104,6 +104,7 @@ bash src/launch_stack.sh
 
 - uses supervised mode by default
 - prompts for sudo once up front
+- cleans up stale PI-LEIC gNB, UE, and collector processes from older runs
 - restarts the Open5GS core services
 - launches `gNB1` and `gNB2` via `systemd-run`
 - creates `ue1` and `ue2` namespaces automatically before launching the UEs
@@ -111,6 +112,7 @@ bash src/launch_stack.sh
 - launches the central metrics collector as a user service
 - optionally launches the dashboard
 - runs readiness checks after the supervised stack has actually started
+- verifies that the required supervised units are actually active before reporting ready
 
 The default supervised mode is the recommended path for repeatable runs and automation.
 
@@ -152,7 +154,7 @@ It will:
 - confirm fresh `source_id` entries for every configured source in `metrics/gnb_metrics.jsonl`
 - confirm fresh non-zero `dl_brate` and `ul_brate` for every configured source
 
-This is the authoritative end-to-end validation flow. By default it launches the stack in supervised mode, enables strict launch readiness checks, disables the dashboard, and validates after real traffic has been generated.
+This is the authoritative end-to-end validation flow. By default it launches the stack in supervised mode, enables strict launch readiness checks, disables the dashboard, and validates after real traffic has been generated. If a stale manual run is still holding ZMQ or NG-U ports, the launcher now cleans up the old PI-LEIC lab processes before starting the supervised units.
 
 If you already have part of the stack running, you can skip steps:
 

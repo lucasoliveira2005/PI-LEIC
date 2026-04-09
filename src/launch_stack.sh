@@ -341,6 +341,169 @@ append_env_arg_if_set() {
   fi
 }
 
+find_pids_by_comm_and_needle() {
+  local comm="$1"
+  local needle="$2"
+
+  ps -eo pid=,comm=,args= | awk -v comm="$comm" -v needle="$needle" '
+    $2 == comm && index($0, needle) {
+      print $1
+    }
+  '
+}
+
+find_pids_by_needle() {
+  local needle="$1"
+
+  ps -eo pid=,args= | awk -v needle="$needle" '
+    index($0, needle) {
+      print $1
+    }
+  '
+}
+
+find_python_pids_by_needle() {
+  local needle="$1"
+
+  ps -eo pid=,comm=,args= | awk -v needle="$needle" '
+    $2 ~ /^python([0-9.]*)?$/ && index($0, needle) {
+      print $1
+    }
+  '
+}
+
+kill_matching_pids() {
+  local label="$1"
+  shift
+  local -a pids=("$@")
+
+  if [[ ${#pids[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "Would terminate stale ${label} processes: $(join_by ', ' "${pids[@]}")"
+    return 0
+  fi
+
+  echo "Terminating stale ${label} processes: $(join_by ', ' "${pids[@]}")"
+  sudo -n kill "${pids[@]}" >/dev/null 2>&1 || true
+  sleep 1
+  sudo -n kill -9 "${pids[@]}" >/dev/null 2>&1 || true
+}
+
+kill_processes_for_comm_and_needles() {
+  local label="$1"
+  local comm="$2"
+  shift 2
+  local needle
+  local pid
+  local -A pid_set=()
+  local -a pids=()
+
+  for needle in "$@"; do
+    [[ -n "$needle" ]] || continue
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] || continue
+      pid_set["$pid"]=1
+    done < <(find_pids_by_comm_and_needle "$comm" "$needle")
+  done
+
+  for pid in "${!pid_set[@]}"; do
+    pids+=("$pid")
+  done
+
+  kill_matching_pids "$label" "${pids[@]}"
+}
+
+kill_python_processes_for_needles() {
+  local label="$1"
+  shift
+  local needle
+  local pid
+  local -A pid_set=()
+  local -a pids=()
+
+  for needle in "$@"; do
+    [[ -n "$needle" ]] || continue
+    while IFS= read -r pid; do
+      [[ -n "$pid" ]] || continue
+      pid_set["$pid"]=1
+    done < <(find_python_pids_by_needle "$needle")
+  done
+
+  for pid in "${!pid_set[@]}"; do
+    pids+=("$pid")
+  done
+
+  kill_matching_pids "$label" "${pids[@]}"
+}
+
+cleanup_stale_lab_processes() {
+  local gnb_config
+  local ue_config
+  local gnb_label
+  local ue_label
+  local gnb_config_rel=""
+  local ue_config_rel=""
+  local metrics_script_rel=""
+  local dashboard_script_rel=""
+  local gnb_comm
+  local ue_comm
+
+  gnb_comm="$(basename -- "$GNB_BIN_RESOLVED")"
+  ue_comm="$(basename -- "$UE_BIN_RESOLVED")"
+
+  if [[ "$METRICS_SCRIPT_PATH" == "$REPO_ROOT_PATH/"* ]]; then
+    metrics_script_rel="${METRICS_SCRIPT_PATH#$REPO_ROOT_PATH/}"
+  fi
+  if [[ "$DASHBOARD_SCRIPT_PATH" == "$REPO_ROOT_PATH/"* ]]; then
+    dashboard_script_rel="${DASHBOARD_SCRIPT_PATH#$REPO_ROOT_PATH/}"
+  fi
+
+  for gnb_config in "${GNB_CONFIG_PATHS[@]}"; do
+    gnb_label="$(config_label "$gnb_config")"
+    if [[ "$gnb_config" == "$REPO_ROOT_PATH/"* ]]; then
+      gnb_config_rel="${gnb_config#$REPO_ROOT_PATH/}"
+    else
+      gnb_config_rel=""
+    fi
+    kill_processes_for_comm_and_needles \
+      "gNB ${gnb_label}" \
+      "$gnb_comm" \
+      "$gnb_config" \
+      "$gnb_config_rel" \
+      "$(basename -- "$gnb_config")"
+  done
+
+  for ue_config in "${UE_CONFIG_PATHS[@]}"; do
+    ue_label="$(config_label "$ue_config")"
+    if [[ "$ue_config" == "$REPO_ROOT_PATH/"* ]]; then
+      ue_config_rel="${ue_config#$REPO_ROOT_PATH/}"
+    else
+      ue_config_rel=""
+    fi
+    kill_processes_for_comm_and_needles \
+      "UE ${ue_label}" \
+      "$ue_comm" \
+      "$ue_config" \
+      "$ue_config_rel" \
+      "$(basename -- "$ue_config")"
+  done
+
+  kill_python_processes_for_needles \
+    "metrics collector" \
+    "$METRICS_SCRIPT_PATH" \
+    "$metrics_script_rel"
+
+  if [[ "$DASHBOARD_ENABLED" == "1" ]]; then
+    kill_python_processes_for_needles \
+      "dashboard" \
+      "$DASHBOARD_SCRIPT_PATH" \
+      "$dashboard_script_rel"
+  fi
+}
+
 open_terminal() {
   local title="$1"
   local command="$2"
@@ -377,8 +540,11 @@ run_health_checks() {
   local -a missing_sources=()
   local -a missing_attach=()
   local -a missing_netns=()
+  local -a inactive_root_units=()
+  local -a inactive_user_units=()
   local source_id
   local ue_netns
+  local unit
 
   if [[ "$HEALTHCHECK_ENABLED" != "1" ]]; then
     return 0
@@ -390,6 +556,8 @@ run_health_checks() {
     missing_sources=()
     missing_attach=()
     missing_netns=()
+    inactive_root_units=()
+    inactive_user_units=()
 
     for source_id in "${METRICS_SOURCE_IDS[@]}"; do
       if ! metrics_source_seen_since "$start_line" "$source_id"; then
@@ -406,11 +574,29 @@ run_health_checks() {
       fi
     done
 
-    if [[ ${#missing_sources[@]} -eq 0 && ${#missing_attach[@]} -eq 0 && ${#missing_netns[@]} -eq 0 ]]; then
+    for unit in "${HEALTHCHECK_ROOT_UNITS[@]}"; do
+      if ! sudo -n systemctl is-active --quiet "$unit" >/dev/null 2>&1; then
+        inactive_root_units+=("$unit")
+      fi
+    done
+
+    for unit in "${HEALTHCHECK_USER_UNITS[@]}"; do
+      if ! systemctl --user is-active --quiet "$unit" >/dev/null 2>&1; then
+        inactive_user_units+=("$unit")
+      fi
+    done
+
+    if [[ ${#missing_sources[@]} -eq 0 && ${#missing_attach[@]} -eq 0 && ${#missing_netns[@]} -eq 0 && ${#inactive_root_units[@]} -eq 0 && ${#inactive_user_units[@]} -eq 0 ]]; then
       echo "Launch readiness checks passed."
       echo "Fresh metrics observed from: $(join_by ', ' "${METRICS_SOURCE_IDS[@]}")"
       echo "UE namespaces present: $(join_by ', ' "${UE_NETNS_LIST[@]}")"
       echo "Attach-like cells metrics observed from: $(join_by ', ' "${METRICS_SOURCE_IDS[@]}")"
+      if [[ ${#HEALTHCHECK_ROOT_UNITS[@]} -gt 0 ]]; then
+        echo "Required supervised root units active: $(join_by ', ' "${HEALTHCHECK_ROOT_UNITS[@]}")"
+      fi
+      if [[ ${#HEALTHCHECK_USER_UNITS[@]} -gt 0 ]]; then
+        echo "Required supervised user units active: $(join_by ', ' "${HEALTHCHECK_USER_UNITS[@]}")"
+      fi
       return 0
     fi
 
@@ -426,6 +612,12 @@ run_health_checks() {
   fi
   if [[ ${#missing_netns[@]} -gt 0 ]]; then
     echo "Missing UE namespaces: $(join_by ', ' "${missing_netns[@]}")"
+  fi
+  if [[ ${#inactive_root_units[@]} -gt 0 ]]; then
+    echo "Inactive or missing supervised root units: $(join_by ', ' "${inactive_root_units[@]}")"
+  fi
+  if [[ ${#inactive_user_units[@]} -gt 0 ]]; then
+    echo "Inactive or missing supervised user units: $(join_by ', ' "${inactive_user_units[@]}")"
   fi
   echo "Use '$0 --status' or '$0 --logs <component>' to inspect the supervised stack."
 
@@ -537,8 +729,13 @@ start_supervised_stack() {
     prepare_python_env
   fi
 
-  start_line="$(metrics_line_count)"
   stop_supervised_stack 1
+  cleanup_stale_lab_processes
+  start_line="$(metrics_line_count)"
+  HEALTHCHECK_ROOT_UNITS=("${ROOT_UNIT_NAMES[@]}")
+  HEALTHCHECK_USER_UNITS=(
+    "$(user_unit_name "metrics-collector")"
+  )
 
   if [[ "$DRY_RUN" == "1" ]]; then
     echo "Would restart core services: $(join_by ' ' "${CORE_UNITS[@]}")"
@@ -569,6 +766,7 @@ start_supervised_stack() {
       append_env_arg_if_set dashboard_args DBUS_SESSION_BUS_ADDRESS
       dashboard_args+=("$VENV_DIR_PATH/bin/python" "$DASHBOARD_SCRIPT_PATH")
       start_user_unit "$dashboard_unit" "PI-LEIC Metrics Dashboard" "${dashboard_args[@]}"
+      HEALTHCHECK_USER_UNITS+=("$dashboard_unit")
     else
       echo "Skipping dashboard in supervised mode because no graphical display was detected."
     fi
@@ -641,7 +839,11 @@ start_terminal_stack() {
     exit 1
   fi
 
+  stop_supervised_stack 1
+  cleanup_stale_lab_processes
   start_line="$(metrics_line_count)"
+  HEALTHCHECK_ROOT_UNITS=()
+  HEALTHCHECK_USER_UNITS=()
 
   core_command="$(
     cat <<EOF
@@ -774,6 +976,7 @@ show_component_logs() {
 require_command sudo
 require_command systemctl
 require_command systemd-run
+require_command ps
 
 if [[ ! -d "$WORKDIR" ]]; then
   echo "Workdir does not exist: $WORKDIR" >&2
@@ -793,6 +996,7 @@ DASHBOARD_SCRIPT_PATH="$(resolve_path "$WORKDIR" "$DASHBOARD_SCRIPT")"
 METRICS_SOURCES_CONFIG_PATH="$(resolve_path "$WORKDIR" "$METRICS_SOURCES_CONFIG")"
 METRICS_OUT_PATH="$(resolve_path "$WORKDIR" "$METRICS_OUT")"
 VENV_DIR_PATH="$(resolve_path "$WORKDIR" "$VENV_DIR")"
+REPO_ROOT_PATH="$(cd -- "$(dirname -- "$METRICS_SOURCES_CONFIG_PATH")/.." && pwd)"
 
 require_file "Requirements file" "$REQUIREMENTS_FILE_PATH"
 require_file "Metrics collector" "$METRICS_SCRIPT_PATH"
@@ -832,6 +1036,8 @@ USER_UNIT_NAMES=(
   "$(user_unit_name "metrics-collector")"
   "$(user_unit_name "dashboard")"
 )
+HEALTHCHECK_ROOT_UNITS=()
+HEALTHCHECK_USER_UNITS=()
 declare -A COMPONENT_ROOT_UNITS=()
 COMPONENT_KEYS=()
 
