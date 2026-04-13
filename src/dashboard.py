@@ -1,13 +1,17 @@
 #!/usr/bin/env python3
 import os
+import sys
 from pathlib import Path
+
+SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
 
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 
 from metrics_api import MetricsLogReader
 
-SCRIPT_DIR = Path(__file__).resolve().parent
 LOG_FILE = Path(os.environ.get("METRICS_OUT", SCRIPT_DIR / "../metrics/gnb_metrics.jsonl"))
 LOG_INCLUDE_ROTATED = os.environ.get("METRICS_LOG_INCLUDE_ROTATED", "1") != "0"
 LOG_MAX_ARCHIVES = int(os.environ.get("METRICS_LOG_MAX_ARCHIVES", "5"))

@@ -184,7 +184,9 @@ start_line = int(sys.argv[2])
 repo_root = Path(sys.argv[3]).resolve()
 required_sources = sys.argv[4:]
 
-sys.path.insert(0, str(repo_root / "src"))
+src_dir = repo_root / "src"
+if str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
 
 try:
     from metrics_identity import build_ue_identity
