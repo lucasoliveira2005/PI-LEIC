@@ -100,6 +100,10 @@ python src/provision_subscribers.py --apply
 bash src/launch_stack.sh
 ```
 
+Run the launcher as your regular user (no `sudo` before the command). It
+requests sudo internally only for privileged operations and needs access to
+your systemd user services.
+
 `src/launch_stack.sh` is the main launcher for this stage. It:
 
 - uses supervised mode by default
@@ -111,9 +115,14 @@ bash src/launch_stack.sh
 - launches `UE1` and `UE2` via `systemd-run`
 - launches the central metrics collector as a user service
 - optionally launches the dashboard
+- waits dynamically for Open5GS core readiness (active units, startup log markers, live socket probes, and active endpoint probes) before starting attach-sensitive components
 - runs readiness checks after the supervised stack has actually started
 - waits for each UE namespace to gain tunnel IPv4 and a default route
 - verifies that the required supervised units are actually active before reporting ready
+- fails fast when explicit attach/PDU failure signals are detected in UE/core logs
+
+When the dashboard is disabled or there is no display, `--status` only reports user
+units that are actually loaded.
 
 The default supervised mode is the recommended path for repeatable runs and automation.
 
@@ -147,6 +156,10 @@ cd /path/to/PI-LEIC
 bash src/validate_stage.sh
 ```
 
+Run the validator as your regular user (no `sudo` before the command). It
+requests sudo internally only for privileged operations and relies on
+systemd user services for supervised orchestration.
+
 It will:
 
 - apply `config/subscribers.json`
@@ -155,7 +168,7 @@ It will:
 - confirm fresh `source_id` entries for every configured source in `metrics/gnb_metrics.jsonl`
 - confirm fresh non-zero `dl_brate` and `ul_brate` for every configured source
 
-This is the authoritative end-to-end validation flow. By default it launches the stack in supervised mode, enables strict launch readiness checks, disables the dashboard, waits for each UE namespace to gain a usable route, and validates after real traffic has been generated. If a stale manual run is still holding ZMQ or NG-U ports, the launcher now cleans up the old PI-LEIC lab processes before starting the supervised units.
+This is the authoritative end-to-end validation flow. By default it launches the stack in supervised mode, enables dynamic core readiness checks before UE attach (including live socket and active endpoint probes), enables strict launch readiness checks for service and metrics health, fails fast on explicit attach/PDU failure signals with categorized cause summaries, disables the dashboard, defers UE data-path checks to this script, waits for each UE namespace to gain a usable route, and validates after real traffic has been generated. If a stale manual run is still holding ZMQ or NG-U ports, the launcher now cleans up the old PI-LEIC lab processes before starting the supervised units.
 
 If you already have part of the stack running, you can skip steps:
 
@@ -248,6 +261,27 @@ The collector source list is defined in:
 
 - `config/metrics_sources.json`
 
+The internal metrics access layer used by the dashboard is:
+
+- `src/metrics_api.py`
+
+The collector now supports built-in JSONL rotation/retention with environment variables:
+
+- `METRICS_ROTATE_MAX_BYTES` (default `52428800`, 50 MiB)
+- `METRICS_ROTATE_MAX_FILES` (default `5`)
+
+When rotation is enabled, older files are kept as:
+
+- `metrics/gnb_metrics.jsonl.1`
+- `metrics/gnb_metrics.jsonl.2`
+- etc., up to `METRICS_ROTATE_MAX_FILES`
+
+By default, the dashboard reads current plus rotated files through `src/metrics_api.py`.
+You can control this behavior with:
+
+- `METRICS_LOG_INCLUDE_ROTATED` (default `1`)
+- `METRICS_LOG_MAX_ARCHIVES` (default `5`)
+
 To confirm the metrics file is growing:
 
 ```bash
@@ -260,6 +294,20 @@ To test UE connectivity after attach:
 sudo ip netns exec ue1 ping 10.45.0.1
 sudo ip netns exec ue2 ping 10.45.0.1
 ```
+
+## Tests And CI
+
+Run local unit tests with:
+
+```bash
+python -m unittest discover -s tests -p "test_*.py" -v
+```
+
+The repository now includes a minimal CI workflow in `.github/workflows/ci.yml` that runs:
+
+- shell syntax checks for launcher/validator scripts
+- Python syntax checks for key scripts
+- unit tests under `tests/`
 
 ## Useful Commands
 

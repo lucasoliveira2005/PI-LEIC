@@ -16,6 +16,26 @@ OUT = Path(os.environ.get("METRICS_OUT", SCRIPT_DIR / "../metrics/gnb_metrics.js
 RECONNECT_SECONDS = float(os.environ.get("METRICS_RECONNECT_SECONDS", "3"))
 
 
+def parse_non_negative_int_env(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+
+    try:
+        value = int(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be an integer, got: {raw}") from exc
+
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0, got: {value}")
+
+    return value
+
+
+ROTATE_MAX_BYTES = parse_non_negative_int_env("METRICS_ROTATE_MAX_BYTES", 50 * 1024 * 1024)
+ROTATE_MAX_FILES = parse_non_negative_int_env("METRICS_ROTATE_MAX_FILES", 5)
+
+
 def load_sources():
     with SOURCES_CONFIG.open("r", encoding="utf-8") as f:
         sources = json.load(f)
@@ -130,13 +150,41 @@ def summarize_event(event):
 
 
 class EventWriter:
-    def __init__(self, output_path):
+    def __init__(self, output_path, rotate_max_bytes=0, rotate_max_files=0):
         self.output_path = output_path
+        self.rotate_max_bytes = max(0, rotate_max_bytes)
+        self.rotate_max_files = max(0, rotate_max_files)
         self.lock = threading.Lock()
+
+    def _rotated_path(self, index):
+        return self.output_path.with_name(f"{self.output_path.name}.{index}")
+
+    def _rotate_if_needed(self):
+        if self.rotate_max_bytes <= 0 or self.rotate_max_files <= 0:
+            return
+
+        if not self.output_path.exists():
+            return
+
+        if self.output_path.stat().st_size < self.rotate_max_bytes:
+            return
+
+        oldest = self._rotated_path(self.rotate_max_files)
+        if oldest.exists():
+            oldest.unlink()
+
+        for index in range(self.rotate_max_files - 1, 0, -1):
+            src = self._rotated_path(index)
+            dst = self._rotated_path(index + 1)
+            if src.exists():
+                src.replace(dst)
+
+        self.output_path.replace(self._rotated_path(1))
 
     def write(self, event):
         line = json.dumps(event, ensure_ascii=False)
         with self.lock:
+            self._rotate_if_needed()
             with self.output_path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
                 f.flush()
@@ -202,10 +250,23 @@ class MetricsSourceWorker:
 def main():
     sources = load_sources()
     OUT.parent.mkdir(parents=True, exist_ok=True)
-    writer = EventWriter(OUT)
+    writer = EventWriter(
+        OUT,
+        rotate_max_bytes=ROTATE_MAX_BYTES,
+        rotate_max_files=ROTATE_MAX_FILES,
+    )
 
     print(f"Metrics collector ready. Sources: {SOURCES_CONFIG.resolve()}", flush=True)
     print(f"Writing enriched metrics to: {OUT.resolve()}", flush=True)
+    if ROTATE_MAX_BYTES > 0 and ROTATE_MAX_FILES > 0:
+        print(
+            "Rotation enabled: "
+            f"METRICS_ROTATE_MAX_BYTES={ROTATE_MAX_BYTES}, "
+            f"METRICS_ROTATE_MAX_FILES={ROTATE_MAX_FILES}",
+            flush=True,
+        )
+    else:
+        print("Rotation disabled for metrics output.", flush=True)
 
     threads = []
     for source in sources:

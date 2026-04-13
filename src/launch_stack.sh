@@ -24,10 +24,30 @@ MPLCONFIGDIR_PATH="${MPLCONFIGDIR_PATH:-/tmp/pi-leic-matplotlib}"
 DASHBOARD_ENABLED="${DASHBOARD_ENABLED:-1}"
 HEALTHCHECK_ENABLED="${HEALTHCHECK_ENABLED:-1}"
 HEALTHCHECK_STRICT="${HEALTHCHECK_STRICT:-0}"
+HEALTHCHECK_REQUIRE_UE_DATA_PATH="${HEALTHCHECK_REQUIRE_UE_DATA_PATH:-1}"
+HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS="${HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS:-1}"
+HEALTHCHECK_UE_FAILURE_REGEX="${HEALTHCHECK_UE_FAILURE_REGEX:-Registration reject|Attach reject|PDU session.*reject|PDU Session.*reject}"
+HEALTHCHECK_AMF_FAILURE_REGEX="${HEALTHCHECK_AMF_FAILURE_REGEX:-HTTP response error \\[(status:)?5[0-9][0-9]\\]|Cannot discover \\[[^]]+\\]|Registration reject}"
 HEALTHCHECK_TIMEOUT_SECONDS="${HEALTHCHECK_TIMEOUT_SECONDS:-30}"
 HEALTHCHECK_POLL_SECONDS="${HEALTHCHECK_POLL_SECONDS:-1}"
+CORE_READINESS_TIMEOUT_SECONDS="${CORE_READINESS_TIMEOUT_SECONDS:-45}"
+CORE_READINESS_POLL_SECONDS="${CORE_READINESS_POLL_SECONDS:-1}"
+CORE_READINESS_STABLE_POLLS="${CORE_READINESS_STABLE_POLLS:-3}"
+CORE_READINESS_REQUIRE_LOG_MARKERS="${CORE_READINESS_REQUIRE_LOG_MARKERS:-1}"
+CORE_READINESS_REQUIRE_SMF_AMF_ASSOCIATION="${CORE_READINESS_REQUIRE_SMF_AMF_ASSOCIATION:-1}"
+CORE_READINESS_REQUIRE_SOCKET_PROBES="${CORE_READINESS_REQUIRE_SOCKET_PROBES:-1}"
+CORE_READINESS_REQUIRE_ACTIVE_ENDPOINT_PROBES="${CORE_READINESS_REQUIRE_ACTIVE_ENDPOINT_PROBES:-1}"
+CORE_READINESS_ENDPOINT_PROBE_TIMEOUT_SECONDS="${CORE_READINESS_ENDPOINT_PROBE_TIMEOUT_SECONDS:-1}"
+CORE_PROBE_SMF_PFCP_PORT="${CORE_PROBE_SMF_PFCP_PORT:-8805}"
+CORE_PROBE_UPF_PFCP_PORT="${CORE_PROBE_UPF_PFCP_PORT:-8805}"
+CORE_PROBE_UPF_GTPU_PORT="${CORE_PROBE_UPF_GTPU_PORT:-2152}"
+CORE_STABILIZATION_SECONDS="${CORE_STABILIZATION_SECONDS:-0}"
+CORE_AMF_LOG_PATH="${CORE_AMF_LOG_PATH:-/var/log/open5gs/amf.log}"
+CORE_SMF_LOG_PATH="${CORE_SMF_LOG_PATH:-/var/log/open5gs/smf.log}"
+CORE_UPF_LOG_PATH="${CORE_UPF_LOG_PATH:-/var/log/open5gs/upf.log}"
 SUDO_KEEPALIVE_INTERVAL_SECONDS="${SUDO_KEEPALIVE_INTERVAL_SECONDS:-20}"
 UNIT_PREFIX="${UNIT_PREFIX:-pi-leic}"
+ALLOW_SUPERVISED_AS_ROOT="${ALLOW_SUPERVISED_AS_ROOT:-0}"
 
 CORE_UNITS=(
   open5gs-mmed
@@ -71,13 +91,28 @@ Environment overrides:
   WORKDIR, MODE, PYTHON_BIN, VENV_DIR, REQUIREMENTS_FILE, METRICS_SCRIPT, DASHBOARD_SCRIPT
   METRICS_SOURCES_CONFIG, METRICS_OUT, GNB_BIN, UE_BIN, GNB_CONFIGS, UE_CONFIGS
   DASHBOARD_ENABLED, HEALTHCHECK_ENABLED, HEALTHCHECK_STRICT
+  HEALTHCHECK_REQUIRE_UE_DATA_PATH, HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS
+  HEALTHCHECK_UE_FAILURE_REGEX, HEALTHCHECK_AMF_FAILURE_REGEX
   HEALTHCHECK_TIMEOUT_SECONDS, HEALTHCHECK_POLL_SECONDS
+  CORE_READINESS_TIMEOUT_SECONDS, CORE_READINESS_POLL_SECONDS
+  CORE_READINESS_STABLE_POLLS, CORE_READINESS_REQUIRE_LOG_MARKERS
+  CORE_READINESS_REQUIRE_SMF_AMF_ASSOCIATION
+  CORE_READINESS_REQUIRE_SOCKET_PROBES
+  CORE_READINESS_REQUIRE_ACTIVE_ENDPOINT_PROBES
+  CORE_READINESS_ENDPOINT_PROBE_TIMEOUT_SECONDS
+  CORE_PROBE_SMF_PFCP_PORT, CORE_PROBE_UPF_PFCP_PORT, CORE_PROBE_UPF_GTPU_PORT
+  CORE_STABILIZATION_SECONDS
+  CORE_AMF_LOG_PATH, CORE_SMF_LOG_PATH, CORE_UPF_LOG_PATH
   SUDO_KEEPALIVE_INTERVAL_SECONDS, UNIT_PREFIX
 
 Notes:
   GNB_CONFIGS and UE_CONFIGS use colon-separated paths.
   Supervised mode prompts for sudo once, starts root components via systemd-run,
   and is the recommended mode for validation and repeatable runs.
+  Core readiness waits dynamically for active core units, startup markers,
+  optional SMF<->AMF association markers,
+  live Open5GS socket probes, and active endpoint probes,
+  then optionally applies CORE_STABILIZATION_SECONDS as an extra settle delay.
   Terminals mode is kept as a fallback for manual desktop debugging.
 EOF
 }
@@ -173,6 +208,38 @@ require_file() {
 
   if [[ ! -f "$path" ]]; then
     echo "$label not found: $path" >&2
+    exit 1
+  fi
+}
+
+require_supervised_runtime_prereqs() {
+  if [[ "$MODE" != "supervised" || "$DRY_RUN" == "1" ]]; then
+    return 0
+  fi
+
+  if [[ "${EUID:-$(id -u)}" -eq 0 && "$ALLOW_SUPERVISED_AS_ROOT" != "1" ]]; then
+    cat >&2 <<'EOF'
+launch_stack.sh in supervised mode should be run as your regular user, not via sudo/root.
+
+Use:
+  bash src/launch_stack.sh
+
+The script requests sudo only for privileged operations and runs collector/dashboard
+as user services.
+If you really need root mode, set ALLOW_SUPERVISED_AS_ROOT=1 explicitly.
+EOF
+    exit 1
+  fi
+
+  if ! systemctl --user show-environment >/dev/null 2>&1; then
+    cat >&2 <<'EOF'
+Unable to access the systemd user bus required by supervised mode.
+
+Try running from your normal login session (without sudo), for example:
+  bash src/launch_stack.sh
+
+If you are on SSH/headless, ensure your user manager and DBUS session are available.
+EOF
     exit 1
   fi
 }
@@ -287,6 +354,176 @@ metrics_line_count() {
   fi
 }
 
+root_file_line_count() {
+  local path="$1"
+  local line_count
+
+  if ! sudo -n test -f "$path" >/dev/null 2>&1; then
+    echo 0
+    return
+  fi
+
+  line_count="$(sudo -n wc -l -- "$path" 2>/dev/null | awk '{print $1}' || true)"
+  if [[ "$line_count" =~ ^[0-9]+$ ]]; then
+    echo "$line_count"
+  else
+    echo 0
+  fi
+}
+
+root_file_contains_pattern_since_line() {
+  local path="$1"
+  local start_line="$2"
+  local regex="$3"
+
+  [[ -n "$regex" ]] || return 1
+  if ! sudo -n test -f "$path" >/dev/null 2>&1; then
+    return 1
+  fi
+
+  sudo -n tail -n "+$((start_line + 1))" "$path" 2>/dev/null \
+    | grep -E -i "$regex" >/dev/null 2>&1
+}
+
+root_file_first_match_since_line() {
+  local path="$1"
+  local start_line="$2"
+  local regex="$3"
+
+  [[ -n "$regex" ]] || return 0
+  if ! sudo -n test -f "$path" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  sudo -n tail -n "+$((start_line + 1))" "$path" 2>/dev/null \
+    | grep -E -i -m 1 "$regex" || true
+}
+
+root_unit_first_match_since_epoch() {
+  local unit="$1"
+  local since_epoch="$2"
+  local regex="$3"
+
+  [[ -n "$regex" ]] || return 0
+  sudo -n journalctl -u "$unit" --since "@$since_epoch" --no-pager -o cat 2>/dev/null \
+    | grep -E -i -m 1 "$regex" || true
+}
+
+socket_snapshot_has_process_tcp_listener() {
+  local snapshot="$1"
+  local process_name="$2"
+
+  awk -v process_name="$process_name" '
+    $1 ~ /^tcp/ && index($0, process_name) {
+      found = 1
+      exit
+    }
+    END {
+      exit(found ? 0 : 1)
+    }
+  ' <<< "$snapshot"
+}
+
+socket_snapshot_has_process_udp_port() {
+  local snapshot="$1"
+  local process_name="$2"
+  local port="$3"
+
+  awk -v process_name="$process_name" -v port="$port" '
+    $1 ~ /^udp/ && index($0, process_name) && ($5 ~ ":" port "$" || $5 ~ "\\]:" port "$") {
+      found = 1
+      exit
+    }
+    END {
+      exit(found ? 0 : 1)
+    }
+  ' <<< "$snapshot"
+}
+
+collect_core_socket_probe_failures() {
+  local snapshot="$1"
+  local -n failures_ref="$2"
+
+  failures_ref=()
+
+  if ! socket_snapshot_has_process_tcp_listener "$snapshot" "open5gs-amfd"; then
+    failures_ref+=("open5gs-amfd missing tcp listener")
+  fi
+  if ! socket_snapshot_has_process_tcp_listener "$snapshot" "open5gs-smfd"; then
+    failures_ref+=("open5gs-smfd missing tcp listener")
+  fi
+  if ! socket_snapshot_has_process_udp_port "$snapshot" "open5gs-smfd" "$CORE_PROBE_SMF_PFCP_PORT"; then
+    failures_ref+=("open5gs-smfd missing udp:${CORE_PROBE_SMF_PFCP_PORT}")
+  fi
+  if ! socket_snapshot_has_process_udp_port "$snapshot" "open5gs-upfd" "$CORE_PROBE_UPF_PFCP_PORT"; then
+    failures_ref+=("open5gs-upfd missing udp:${CORE_PROBE_UPF_PFCP_PORT}")
+  fi
+  if ! socket_snapshot_has_process_udp_port "$snapshot" "open5gs-upfd" "$CORE_PROBE_UPF_GTPU_PORT"; then
+    failures_ref+=("open5gs-upfd missing udp:${CORE_PROBE_UPF_GTPU_PORT}")
+  fi
+
+  [[ ${#failures_ref[@]} -gt 0 ]]
+}
+
+first_tcp_listener_endpoint_for_process() {
+  local snapshot="$1"
+  local process_name="$2"
+
+  awk -v process_name="$process_name" '
+    $1 ~ /^tcp/ && index($0, process_name) {
+      split($5, parts, ":")
+      port = parts[length(parts)]
+      host = substr($5, 1, length($5) - length(port) - 1)
+
+      if (host == "*" || host == "0.0.0.0") {
+        host = "127.0.0.1"
+      }
+
+      if (host ~ /\[/ || host ~ /:/) {
+        next
+      }
+
+      print host ":" port
+      exit
+    }
+  ' <<< "$snapshot"
+}
+
+tcp_endpoint_probe_ok() {
+  local endpoint="$1"
+  local host="${endpoint%:*}"
+  local port="${endpoint##*:}"
+
+  [[ -n "$host" && -n "$port" ]] || return 1
+
+  timeout "$CORE_READINESS_ENDPOINT_PROBE_TIMEOUT_SECONDS" \
+    bash -c ": </dev/tcp/${host}/${port}" >/dev/null 2>&1
+}
+
+collect_core_endpoint_probe_failures() {
+  local snapshot="$1"
+  local -n failures_ref="$2"
+  local endpoint
+
+  failures_ref=()
+
+  endpoint="$(first_tcp_listener_endpoint_for_process "$snapshot" "open5gs-amfd")"
+  if [[ -z "$endpoint" ]]; then
+    failures_ref+=("open5gs-amfd missing active endpoint")
+  elif ! tcp_endpoint_probe_ok "$endpoint"; then
+    failures_ref+=("open5gs-amfd endpoint probe failed: ${endpoint}")
+  fi
+
+  endpoint="$(first_tcp_listener_endpoint_for_process "$snapshot" "open5gs-smfd")"
+  if [[ -z "$endpoint" ]]; then
+    failures_ref+=("open5gs-smfd missing active endpoint")
+  elif ! tcp_endpoint_probe_ok "$endpoint"; then
+    failures_ref+=("open5gs-smfd endpoint probe failed: ${endpoint}")
+  fi
+
+  [[ ${#failures_ref[@]} -gt 0 ]]
+}
+
 netns_exists() {
   local netns_name="$1"
   ip netns list | awk '{print $1}' | grep -Fx "$netns_name" >/dev/null 2>&1
@@ -297,14 +534,14 @@ netns_device_has_ipv4() {
   local device_name="$2"
 
   [[ -n "$device_name" ]] || return 1
-  sudo -n ip netns exec "$netns_name" ip -4 -o addr show dev "$device_name" scope global \
+  sudo -n ip netns exec "$netns_name" ip -4 -o addr show dev "$device_name" scope global 2>/dev/null \
     | grep -q .
 }
 
 netns_has_default_route() {
   local netns_name="$1"
 
-  sudo -n ip netns exec "$netns_name" ip route show default | grep -q .
+  sudo -n ip netns exec "$netns_name" ip route show default 2>/dev/null | grep -q .
 }
 
 metrics_source_seen_since() {
@@ -561,9 +798,256 @@ open_terminal() {
   esac
 }
 
+wait_for_core_readiness() {
+  local amf_start_line="$1"
+  local smf_start_line="$2"
+  local upf_start_line="$3"
+  local deadline=$((SECONDS + CORE_READINESS_TIMEOUT_SECONDS))
+  local marker_checks_enabled="$CORE_READINESS_REQUIRE_LOG_MARKERS"
+  local smf_amf_assoc_checks_enabled="$CORE_READINESS_REQUIRE_SMF_AMF_ASSOCIATION"
+  local socket_probe_checks_enabled="$CORE_READINESS_REQUIRE_SOCKET_PROBES"
+  local endpoint_probe_checks_enabled="$CORE_READINESS_REQUIRE_ACTIVE_ENDPOINT_PROBES"
+  local stable_polls=0
+  local -a inactive_units=()
+  local -a missing_markers=()
+  local -a missing_socket_probes=()
+  local -a missing_endpoint_probes=()
+  local unit
+  local core_failure_line
+  local socket_snapshot
+
+  if [[ "$DRY_RUN" == "1" ]]; then
+    echo "Would wait up to ${CORE_READINESS_TIMEOUT_SECONDS}s for dynamic Open5GS core readiness checks."
+    return 0
+  fi
+
+  echo "Waiting up to ${CORE_READINESS_TIMEOUT_SECONDS}s for dynamic Open5GS core readiness..."
+
+  if [[ "$marker_checks_enabled" == "1" ]]; then
+    if ! sudo -n test -f "$CORE_AMF_LOG_PATH" >/dev/null 2>&1; then
+      marker_checks_enabled=0
+      echo "Core log marker checks disabled: missing $CORE_AMF_LOG_PATH"
+    elif ! sudo -n test -f "$CORE_SMF_LOG_PATH" >/dev/null 2>&1; then
+      marker_checks_enabled=0
+      echo "Core log marker checks disabled: missing $CORE_SMF_LOG_PATH"
+    elif ! sudo -n test -f "$CORE_UPF_LOG_PATH" >/dev/null 2>&1; then
+      marker_checks_enabled=0
+      echo "Core log marker checks disabled: missing $CORE_UPF_LOG_PATH"
+    fi
+  fi
+
+  if [[ "$marker_checks_enabled" != "1" ]]; then
+    smf_amf_assoc_checks_enabled=0
+  fi
+
+  if [[ "$socket_probe_checks_enabled" == "1" ]]; then
+    if ! sudo -n ss -H -lntup -4 >/dev/null 2>&1; then
+      socket_probe_checks_enabled=0
+      echo "Core socket probes disabled: unable to inspect listening sockets with ss."
+    fi
+  fi
+
+  if [[ "$endpoint_probe_checks_enabled" == "1" ]]; then
+    if [[ "$socket_probe_checks_enabled" != "1" ]]; then
+      endpoint_probe_checks_enabled=0
+      echo "Active endpoint probes disabled: socket probes are unavailable."
+    elif ! command -v timeout >/dev/null 2>&1; then
+      endpoint_probe_checks_enabled=0
+      echo "Active endpoint probes disabled: 'timeout' command is unavailable."
+    fi
+  fi
+
+  while (( SECONDS < deadline )); do
+    inactive_units=()
+    missing_markers=()
+    missing_socket_probes=()
+    missing_endpoint_probes=()
+
+    for unit in "${CORE_UNITS[@]}"; do
+      if ! sudo -n systemctl is-active --quiet "$unit" >/dev/null 2>&1; then
+        inactive_units+=("$unit")
+      fi
+    done
+
+    if [[ "$marker_checks_enabled" == "1" ]]; then
+      if ! root_file_contains_pattern_since_line "$CORE_AMF_LOG_PATH" "$amf_start_line" 'ngap_server|sbi_server'; then
+        missing_markers+=("amf")
+      fi
+      if ! root_file_contains_pattern_since_line "$CORE_SMF_LOG_PATH" "$smf_start_line" 'pfcp_server|gtp_connect|sbi_server'; then
+        missing_markers+=("smf")
+      fi
+      if [[ "$smf_amf_assoc_checks_enabled" == "1" ]] && ! root_file_contains_pattern_since_line "$CORE_SMF_LOG_PATH" "$smf_start_line" '\[AMF\] NFInstance associated|\[namf-comm\] NFService associated'; then
+        missing_markers+=("smf-amf-association")
+      fi
+      if ! root_file_contains_pattern_since_line "$CORE_UPF_LOG_PATH" "$upf_start_line" 'pfcp_server|gtpu_server'; then
+        missing_markers+=("upf")
+      fi
+    fi
+
+    if [[ "$socket_probe_checks_enabled" == "1" ]]; then
+      socket_snapshot="$(sudo -n ss -H -lntup -4 2>/dev/null || true)"
+      collect_core_socket_probe_failures "$socket_snapshot" missing_socket_probes || true
+
+      if [[ "$endpoint_probe_checks_enabled" == "1" ]]; then
+        collect_core_endpoint_probe_failures "$socket_snapshot" missing_endpoint_probes || true
+      fi
+    fi
+
+    core_failure_line="$(root_file_first_match_since_line "$CORE_AMF_LOG_PATH" "$amf_start_line" "$HEALTHCHECK_AMF_FAILURE_REGEX")"
+    if [[ -n "$core_failure_line" ]]; then
+      echo "Detected control-plane failure signal while waiting for core readiness:"
+      echo "  amf.log: ${core_failure_line}"
+      return 1
+    fi
+
+    core_failure_line="$(root_file_first_match_since_line "$CORE_SMF_LOG_PATH" "$smf_start_line" "$HEALTHCHECK_AMF_FAILURE_REGEX")"
+    if [[ -n "$core_failure_line" ]]; then
+      echo "Detected control-plane failure signal while waiting for core readiness:"
+      echo "  smf.log: ${core_failure_line}"
+      return 1
+    fi
+
+    if [[ ${#inactive_units[@]} -eq 0 && ${#missing_markers[@]} -eq 0 && ${#missing_socket_probes[@]} -eq 0 && ${#missing_endpoint_probes[@]} -eq 0 ]]; then
+      stable_polls=$((stable_polls + 1))
+    else
+      stable_polls=0
+    fi
+
+    if (( stable_polls >= CORE_READINESS_STABLE_POLLS )); then
+      echo "Core readiness checks passed."
+      if [[ "$socket_probe_checks_enabled" == "1" ]]; then
+        echo "Core socket probes passed for AMF/SMF/UPF listeners."
+      fi
+      if [[ "$endpoint_probe_checks_enabled" == "1" ]]; then
+        echo "Active endpoint probes passed for AMF/SMF TCP listeners."
+      fi
+      return 0
+    fi
+
+    sleep "$CORE_READINESS_POLL_SECONDS"
+  done
+
+  echo "Timed out waiting for dynamic Open5GS core readiness."
+  if [[ ${#inactive_units[@]} -gt 0 ]]; then
+    echo "Inactive core units: $(join_by ', ' "${inactive_units[@]}")"
+  fi
+  if [[ "$marker_checks_enabled" == "1" && ${#missing_markers[@]} -gt 0 ]]; then
+    echo "Missing startup markers in core logs: $(join_by ', ' "${missing_markers[@]}")"
+  fi
+  if [[ "$socket_probe_checks_enabled" == "1" && ${#missing_socket_probes[@]} -gt 0 ]]; then
+    echo "Missing core socket probes: $(join_by ', ' "${missing_socket_probes[@]}")"
+  fi
+  if [[ "$endpoint_probe_checks_enabled" == "1" && ${#missing_endpoint_probes[@]} -gt 0 ]]; then
+    echo "Failed active endpoint probes: $(join_by ', ' "${missing_endpoint_probes[@]}")"
+  fi
+  return 1
+}
+
+classify_attach_failure_line() {
+  local line="$1"
+  local line_lower
+
+  line_lower="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
+
+  if [[ "$line_lower" == *"cannot discover"* || "$line_lower" == *"http response error [status:5"* || "$line_lower" == *"http response error [5"* ]]; then
+    echo "core-discovery"
+    return
+  fi
+
+  if [[ "$line_lower" == *"registration reject"* || "$line_lower" == *"attach reject"* ]]; then
+    echo "registration-reject"
+    return
+  fi
+
+  if [[ "$line_lower" == *"pdu session"* ]]; then
+    if [[ "$line_lower" == *"reject"* || "$line_lower" == *"fail"* || "$line_lower" == *"error"* || "$line_lower" == *"release"* ]]; then
+      echo "pdu-session"
+      return
+    fi
+  fi
+
+  if [[ "$line_lower" == *"rrc release"* ]]; then
+    echo "rrc-release"
+    return
+  fi
+
+  echo "unknown"
+}
+
+print_attach_failure_summary() {
+  local -n failures_ref="$1"
+  local entry
+  local category
+  local -A counts=()
+  local -a ordered_categories=(
+    "core-discovery"
+    "registration-reject"
+    "pdu-session"
+    "rrc-release"
+    "unknown"
+  )
+
+  for entry in "${failures_ref[@]}"; do
+    category="${entry#[}"
+    if [[ "$category" == "$entry" ]]; then
+      category="unknown"
+    else
+      category="${category%%]*}"
+    fi
+    counts["$category"]=$(( ${counts["$category"]:-0} + 1 ))
+  done
+
+  echo "Attach/PDU failure category summary:"
+  for category in "${ordered_categories[@]}"; do
+    if [[ -n "${counts[$category]:-}" ]]; then
+      echo "  ${category}: ${counts[$category]}"
+      unset 'counts[$category]'
+    fi
+  done
+
+  for category in "${!counts[@]}"; do
+    echo "  ${category}: ${counts[$category]}"
+  done
+}
+
+collect_attach_failure_signals_since() {
+  local since_epoch="$1"
+  local -n failures_ref="$2"
+  local unit
+  local failure_line
+  local category
+
+  failures_ref=()
+
+  failure_line="$(root_file_first_match_since_line "$CORE_AMF_LOG_PATH" "$HEALTHCHECK_AMF_LOG_START_LINE" "$HEALTHCHECK_AMF_FAILURE_REGEX")"
+  if [[ -n "$failure_line" ]]; then
+    category="$(classify_attach_failure_line "$failure_line")"
+    failures_ref+=("[${category}] amf.log: $failure_line")
+  fi
+
+  failure_line="$(root_file_first_match_since_line "$CORE_SMF_LOG_PATH" "$HEALTHCHECK_SMF_LOG_START_LINE" "$HEALTHCHECK_AMF_FAILURE_REGEX")"
+  if [[ -n "$failure_line" ]]; then
+    category="$(classify_attach_failure_line "$failure_line")"
+    failures_ref+=("[${category}] smf.log: $failure_line")
+  fi
+
+  for unit in "${UE_ROOT_UNIT_NAMES[@]}"; do
+    failure_line="$(root_unit_first_match_since_epoch "$unit" "$since_epoch" "$HEALTHCHECK_UE_FAILURE_REGEX")"
+    if [[ -n "$failure_line" ]]; then
+      category="$(classify_attach_failure_line "$failure_line")"
+      failures_ref+=("[${category}] ${unit}: ${failure_line}")
+    fi
+  done
+
+  [[ ${#failures_ref[@]} -gt 0 ]]
+}
+
 run_health_checks() {
   local start_line="$1"
   local deadline=$((SECONDS + HEALTHCHECK_TIMEOUT_SECONDS))
+  local require_ue_data_path="$HEALTHCHECK_REQUIRE_UE_DATA_PATH"
+  local healthcheck_since_epoch="${HEALTHCHECK_START_EPOCH:-0}"
+  local attach_failure_reported=0
   local -a missing_sources=()
   local -a missing_attach=()
   local -a missing_netns=()
@@ -571,13 +1055,22 @@ run_health_checks() {
   local -a missing_default_routes=()
   local -a inactive_root_units=()
   local -a inactive_user_units=()
+  local -a attach_failure_signals=()
+  local -a last_attach_failure_signals=()
   local source_id
   local ue_netns
   local ue_device
   local unit
+  local checks_ready
 
   if [[ "$HEALTHCHECK_ENABLED" != "1" ]]; then
     return 0
+  fi
+
+  if [[ ! "$healthcheck_since_epoch" =~ ^[0-9]+$ ]]; then
+    healthcheck_since_epoch="$(date +%s)"
+  elif (( healthcheck_since_epoch <= 0 )); then
+    healthcheck_since_epoch="$(date +%s)"
   fi
 
   echo "Running launch readiness checks for up to ${HEALTHCHECK_TIMEOUT_SECONDS}s..."
@@ -627,12 +1120,41 @@ run_health_checks() {
       fi
     done
 
-    if [[ ${#missing_sources[@]} -eq 0 && ${#missing_attach[@]} -eq 0 && ${#missing_netns[@]} -eq 0 && ${#missing_netdev_ipv4[@]} -eq 0 && ${#missing_default_routes[@]} -eq 0 && ${#inactive_root_units[@]} -eq 0 && ${#inactive_user_units[@]} -eq 0 ]]; then
+    if collect_attach_failure_signals_since "$healthcheck_since_epoch" attach_failure_signals; then
+      last_attach_failure_signals=("${attach_failure_signals[@]}")
+      if [[ "$attach_failure_reported" == "0" ]]; then
+        echo "Detected attach/PDU failure signals while waiting for readiness:"
+        for source_id in "${attach_failure_signals[@]}"; do
+          echo "  ${source_id}"
+        done
+        print_attach_failure_summary last_attach_failure_signals
+        attach_failure_reported=1
+      fi
+
+      if [[ "$HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS" == "1" ]]; then
+        echo "Failing launch readiness early due to explicit attach/PDU failure signals."
+        return 1
+      fi
+    fi
+
+    checks_ready=1
+    if [[ ${#missing_sources[@]} -gt 0 || ${#missing_attach[@]} -gt 0 || ${#missing_netns[@]} -gt 0 || ${#inactive_root_units[@]} -gt 0 || ${#inactive_user_units[@]} -gt 0 ]]; then
+      checks_ready=0
+    fi
+    if [[ "$require_ue_data_path" == "1" && ( ${#missing_netdev_ipv4[@]} -gt 0 || ${#missing_default_routes[@]} -gt 0 ) ]]; then
+      checks_ready=0
+    fi
+
+    if [[ "$checks_ready" == "1" ]]; then
       echo "Launch readiness checks passed."
       echo "Fresh metrics observed from: $(join_by ', ' "${METRICS_SOURCE_IDS[@]}")"
       echo "UE namespaces present: $(join_by ', ' "${UE_NETNS_LIST[@]}")"
       echo "Attach-like cells metrics observed from: $(join_by ', ' "${METRICS_SOURCE_IDS[@]}")"
-      echo "UE namespace data path ready: $(join_by ', ' "${UE_NETNS_LIST[@]}")"
+      if [[ "$require_ue_data_path" == "1" ]]; then
+        echo "UE namespace data path ready: $(join_by ', ' "${UE_NETNS_LIST[@]}")"
+      else
+        echo "UE namespace data path checks deferred (HEALTHCHECK_REQUIRE_UE_DATA_PATH=0)."
+      fi
       if [[ ${#HEALTHCHECK_ROOT_UNITS[@]} -gt 0 ]]; then
         echo "Required supervised root units active: $(join_by ', ' "${HEALTHCHECK_ROOT_UNITS[@]}")"
       fi
@@ -655,17 +1177,27 @@ run_health_checks() {
   if [[ ${#missing_netns[@]} -gt 0 ]]; then
     echo "Missing UE namespaces: $(join_by ', ' "${missing_netns[@]}")"
   fi
-  if [[ ${#missing_netdev_ipv4[@]} -gt 0 ]]; then
-    echo "UE namespaces missing IPv4 on configured tunnel device: $(join_by ', ' "${missing_netdev_ipv4[@]}")"
-  fi
-  if [[ ${#missing_default_routes[@]} -gt 0 ]]; then
-    echo "UE namespaces missing default route: $(join_by ', ' "${missing_default_routes[@]}")"
+  if [[ "$require_ue_data_path" == "1" ]]; then
+    if [[ ${#missing_netdev_ipv4[@]} -gt 0 ]]; then
+      echo "UE namespaces missing IPv4 on configured tunnel device: $(join_by ', ' "${missing_netdev_ipv4[@]}")"
+    fi
+    if [[ ${#missing_default_routes[@]} -gt 0 ]]; then
+      echo "UE namespaces missing default route: $(join_by ', ' "${missing_default_routes[@]}")"
+    fi
+  elif [[ ${#missing_netdev_ipv4[@]} -gt 0 || ${#missing_default_routes[@]} -gt 0 ]]; then
+    echo "UE data-path checks were deferred in launch readiness (HEALTHCHECK_REQUIRE_UE_DATA_PATH=0)."
   fi
   if [[ ${#inactive_root_units[@]} -gt 0 ]]; then
     echo "Inactive or missing supervised root units: $(join_by ', ' "${inactive_root_units[@]}")"
   fi
   if [[ ${#inactive_user_units[@]} -gt 0 ]]; then
     echo "Inactive or missing supervised user units: $(join_by ', ' "${inactive_user_units[@]}")"
+  fi
+  if [[ "$attach_failure_reported" == "1" ]]; then
+    echo "Attach/PDU failure signals were detected during readiness checks."
+    if [[ ${#last_attach_failure_signals[@]} -gt 0 ]]; then
+      print_attach_failure_summary last_attach_failure_signals
+    fi
   fi
   echo "Use '$0 --status' or '$0 --logs <component>' to inspect the supervised stack."
 
@@ -678,6 +1210,21 @@ stop_user_unit_if_exists() {
   local unit="$1"
   systemctl --user stop "$unit" >/dev/null 2>&1 || true
   systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
+}
+
+collect_known_user_units() {
+  local -n source_ref="$1"
+  local -n target_ref="$2"
+  local unit
+  local load_state
+
+  target_ref=()
+  for unit in "${source_ref[@]}"; do
+    load_state="$(systemctl --user show "$unit" --property=LoadState --value 2>/dev/null || true)"
+    if [[ -n "$load_state" && "$load_state" != "not-found" ]]; then
+      target_ref+=("$unit")
+    fi
+  done
 }
 
 stop_root_unit_if_exists() {
@@ -760,6 +1307,8 @@ start_user_unit() {
 }
 
 start_supervised_stack() {
+  require_supervised_runtime_prereqs
+
   local collector_unit
   local dashboard_unit
   local gnb_config
@@ -769,6 +1318,9 @@ start_supervised_stack() {
   local ue_netns
   local ue_script
   local start_line
+  local amf_log_start_line
+  local smf_log_start_line
+  local upf_log_start_line
   local -a collector_args
   local -a dashboard_args
 
@@ -780,6 +1332,12 @@ start_supervised_stack() {
   stop_supervised_stack 1
   cleanup_stale_lab_processes
   start_line="$(metrics_line_count)"
+  HEALTHCHECK_START_EPOCH="$(date +%s)"
+  HEALTHCHECK_AMF_LOG_START_LINE="$(root_file_line_count "$CORE_AMF_LOG_PATH")"
+  amf_log_start_line="$HEALTHCHECK_AMF_LOG_START_LINE"
+  smf_log_start_line="$(root_file_line_count "$CORE_SMF_LOG_PATH")"
+  HEALTHCHECK_SMF_LOG_START_LINE="$smf_log_start_line"
+  upf_log_start_line="$(root_file_line_count "$CORE_UPF_LOG_PATH")"
   HEALTHCHECK_ROOT_UNITS=("${ROOT_UNIT_NAMES[@]}")
   HEALTHCHECK_USER_UNITS=(
     "$(user_unit_name "metrics-collector")"
@@ -789,6 +1347,17 @@ start_supervised_stack() {
     echo "Would restart core services: $(join_by ' ' "${CORE_UNITS[@]}")"
   else
     sudo -n systemctl restart "${CORE_UNITS[@]}"
+  fi
+
+  wait_for_core_readiness "$amf_log_start_line" "$smf_log_start_line" "$upf_log_start_line"
+
+  if [[ "$CORE_STABILIZATION_SECONDS" -gt 0 ]]; then
+    if [[ "$DRY_RUN" == "1" ]]; then
+      echo "Would apply an extra ${CORE_STABILIZATION_SECONDS}s control-plane settle delay."
+    else
+      echo "Applying an extra ${CORE_STABILIZATION_SECONDS}s control-plane settle delay..."
+      sleep "$CORE_STABILIZATION_SECONDS"
+    fi
   fi
 
   collector_unit="$(user_unit_name "metrics-collector")"
@@ -851,7 +1420,7 @@ start_supervised_stack() {
   echo "Started supervised stack from: $WORKDIR"
   echo "Core services restarted: $(join_by ', ' "${CORE_UNITS[@]}")"
   echo "Root units: $(join_by ', ' "${ROOT_UNIT_NAMES[@]}")"
-  echo "User units: $(join_by ', ' "${USER_UNIT_NAMES[@]}")"
+  echo "User units: $(join_by ', ' "${HEALTHCHECK_USER_UNITS[@]}")"
   echo "Use '$0 --status' for status or '$0 --logs collector' to inspect logs."
   run_health_checks "$start_line"
 }
@@ -890,6 +1459,9 @@ start_terminal_stack() {
   stop_supervised_stack 1
   cleanup_stale_lab_processes
   start_line="$(metrics_line_count)"
+  HEALTHCHECK_START_EPOCH="$(date +%s)"
+  HEALTHCHECK_AMF_LOG_START_LINE="$(root_file_line_count "$CORE_AMF_LOG_PATH")"
+  HEALTHCHECK_SMF_LOG_START_LINE="$(root_file_line_count "$CORE_SMF_LOG_PATH")"
   HEALTHCHECK_ROOT_UNITS=()
   HEALTHCHECK_USER_UNITS=()
 
@@ -897,7 +1469,7 @@ start_terminal_stack() {
     cat <<EOF
 sudo -n systemctl restart $(join_by ' ' "${CORE_UNITS[@]}")
 sudo -n systemctl status open5gs-amfd --no-pager
-sudo -n tail -f /var/log/open5gs/amf.log
+sudo -n tail -f '$CORE_AMF_LOG_PATH'
 EOF
   )"
 
@@ -968,6 +1540,7 @@ EOF
 
 show_supervised_status() {
   local status_target
+  local -a status_user_units=()
 
   require_sudo_session
 
@@ -982,10 +1555,11 @@ show_supervised_status() {
   fi
   echo
   echo "User unit status:"
-  if [[ ${#USER_UNIT_NAMES[@]} -gt 0 ]]; then
-    systemctl --user --no-pager --full status "${USER_UNIT_NAMES[@]}" || true
+  collect_known_user_units USER_UNIT_NAMES status_user_units
+  if [[ ${#status_user_units[@]} -gt 0 ]]; then
+    systemctl --user --no-pager --full status "${status_user_units[@]}" || true
   else
-    echo "No user runtime units configured."
+    echo "No user runtime units currently loaded."
   fi
 
   status_target="$(join_by ', ' "${UE_NETNS_LIST[@]}")"
@@ -1000,7 +1574,7 @@ show_component_logs() {
   case "$target" in
     core)
       require_sudo_session
-      exec sudo -n tail -f /var/log/open5gs/amf.log
+      exec sudo -n tail -f "$CORE_AMF_LOG_PATH"
       ;;
     collector)
       exec journalctl --user -u "$(user_unit_name "metrics-collector")" -f
@@ -1026,6 +1600,7 @@ require_command systemctl
 require_command systemd-run
 require_command ps
 require_command ip
+require_command ss
 
 if [[ ! -d "$WORKDIR" ]]; then
   echo "Workdir does not exist: $WORKDIR" >&2
@@ -1081,12 +1656,16 @@ fi
 
 UE_NETNS_LIST=()
 ROOT_UNIT_NAMES=()
+UE_ROOT_UNIT_NAMES=()
 USER_UNIT_NAMES=(
   "$(user_unit_name "metrics-collector")"
   "$(user_unit_name "dashboard")"
 )
 HEALTHCHECK_ROOT_UNITS=()
 HEALTHCHECK_USER_UNITS=()
+HEALTHCHECK_START_EPOCH=0
+HEALTHCHECK_AMF_LOG_START_LINE=0
+HEALTHCHECK_SMF_LOG_START_LINE=0
 declare -A UE_NETNS_DEVICE_MAP=()
 declare -A COMPONENT_ROOT_UNITS=()
 COMPONENT_KEYS=()
@@ -1113,6 +1692,7 @@ for ue_config in "${UE_CONFIG_PATHS[@]}"; do
     exit 1
   fi
   ROOT_UNIT_NAMES+=("$ue_unit")
+  UE_ROOT_UNIT_NAMES+=("$ue_unit")
   COMPONENT_ROOT_UNITS["$ue_label"]="$ue_unit"
   COMPONENT_KEYS+=("$ue_label")
   UE_NETNS_LIST+=("$ue_netns")

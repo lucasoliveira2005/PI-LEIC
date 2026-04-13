@@ -1,13 +1,21 @@
 #!/usr/bin/env python3
-import json
 import os
 from pathlib import Path
 
 import matplotlib.animation as animation
 import matplotlib.pyplot as plt
 
+from metrics_api import MetricsLogReader
+
 SCRIPT_DIR = Path(__file__).resolve().parent
 LOG_FILE = Path(os.environ.get("METRICS_OUT", SCRIPT_DIR / "../metrics/gnb_metrics.jsonl"))
+LOG_INCLUDE_ROTATED = os.environ.get("METRICS_LOG_INCLUDE_ROTATED", "1") != "0"
+LOG_MAX_ARCHIVES = int(os.environ.get("METRICS_LOG_MAX_ARCHIVES", "5"))
+READER = MetricsLogReader(
+    LOG_FILE,
+    include_rotated=LOG_INCLUDE_ROTATED,
+    max_archives=LOG_MAX_ARCHIVES,
+)
 
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
 plt.subplots_adjust(hspace=0.4)
@@ -29,38 +37,6 @@ def get_source_color(source_id):
     if source_id not in source_colors:
         source_colors[source_id] = palette[len(source_colors) % len(palette)]
     return source_colors[source_id]
-
-
-def extract_payload(entry):
-    return entry.get("raw_payload") or entry.get("payload") or entry
-
-
-def get_latest_cell_metrics(lines):
-    latest_by_source = {}
-
-    for line in lines:
-        try:
-            entry = json.loads(line)
-        except json.JSONDecodeError:
-            continue
-
-        source_id = entry.get("source_id", "single")
-        payload = extract_payload(entry)
-
-        cells = payload.get("cells")
-        if not cells:
-            continue
-
-        ue_list = cells[0].get("ue_list") or []
-        if not ue_list:
-            continue
-
-        latest_by_source[source_id] = {
-            "timestamp": entry.get("timestamp") or payload.get("timestamp"),
-            "ue": ue_list[0],
-        }
-
-    return latest_by_source
 
 
 def append_source_sample(source_id, ue_metrics):
@@ -90,19 +66,10 @@ def append_source_sample(source_id, ue_metrics):
 
 
 def animate(_):
-    if not LOG_FILE.exists():
-        return
-
     try:
-        with LOG_FILE.open("r", encoding="utf-8") as f:
-            lines = f.readlines()
+        latest_by_source = READER.latest_cells_by_source()
     except Exception:
         return
-
-    if not lines:
-        return
-
-    latest_by_source = get_latest_cell_metrics(lines)
     if not latest_by_source:
         return
 
@@ -163,4 +130,9 @@ def animate(_):
 ani = animation.FuncAnimation(fig, animate, interval=1000)
 
 print(f"Monitorizando {LOG_FILE.resolve()}...")
+if LOG_INCLUDE_ROTATED:
+    print(
+        "Leitura de métricas inclui ficheiros rotacionados "
+        f"(até {LOG_MAX_ARCHIVES} arquivos)."
+    )
 plt.show()
