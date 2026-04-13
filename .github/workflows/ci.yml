@@ -1,0 +1,53 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install dependencies
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -r requirements.txt
+
+      - name: Shell syntax checks
+        run: |
+          bash -n src/launch_stack.sh
+          bash -n src/launch_lib/common.sh
+          bash -n src/launch_lib/health_classification.sh
+          bash -n src/validate_stage.sh
+          bash -n tests/test_launch_lib_common.sh
+          bash -n tests/test_launch_lib_health_classification.sh
+          bash -n tests/test_launch_stack_dry_run_rootless.sh
+          bash -n tests/test_validate_stage_rootless.sh
+
+      - name: Rootless shell behavior tests
+        run: |
+          bash tests/test_launch_lib_common.sh
+          bash tests/test_launch_lib_health_classification.sh
+          bash tests/test_launch_stack_dry_run_rootless.sh
+          bash tests/test_validate_stage_rootless.sh
+
+      - name: Python syntax checks
+        run: |
+          python -m py_compile src/metrics_api.py
+          python -m py_compile src/metrics_identity.py
+          python -m py_compile src/metrics_collector.py
+          python -m py_compile src/dashboard.py
+          python -m py_compile src/provision_subscribers.py
+
+      - name: Unit tests
+        run: |
+          python -m unittest discover -s tests -p "test_*.py" -v
