@@ -1,4 +1,5 @@
 #!/usr/bin/env python3
+import json
 import os
 import sys
 from pathlib import Path
@@ -29,7 +30,7 @@ fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
 plt.subplots_adjust(hspace=0.4)
 
 history_by_entity = {}
-last_timestamp_by_entity = {}
+last_sample_signature_by_entity = {}
 entity_colors = {}
 palette = [
     "tab:blue",
@@ -94,6 +95,15 @@ def append_entity_sample(entity_key, ue_metrics):
         history["signal_values"].pop(0)
 
 
+def build_entity_sample_signature(latest_timestamp, ue_metrics):
+    if latest_timestamp not in (None, ""):
+        return f"ts:{latest_timestamp}"
+
+    # Some payloads can omit event timestamps. In that case, dedupe by metrics
+    # content so repeated refreshes do not append the same sample indefinitely.
+    return "payload:" + json.dumps(ue_metrics, sort_keys=True, ensure_ascii=False)
+
+
 def animate(_):
     try:
         latest_by_source = READER.latest_cells_by_source()
@@ -112,12 +122,12 @@ def animate(_):
                 continue
 
             entity_key = parse_entity_key(source_id, entity)
-            if latest_timestamp and last_timestamp_by_entity.get(entity_key) == latest_timestamp:
+            sample_signature = build_entity_sample_signature(latest_timestamp, ue_metrics)
+            if last_sample_signature_by_entity.get(entity_key) == sample_signature:
                 continue
 
             append_entity_sample(entity_key, ue_metrics)
-            if latest_timestamp:
-                last_timestamp_by_entity[entity_key] = latest_timestamp
+            last_sample_signature_by_entity[entity_key] = sample_signature
 
     # Gráfico de Bitrate
     ax1.clear()
