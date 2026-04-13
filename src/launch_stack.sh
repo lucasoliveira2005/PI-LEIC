@@ -70,6 +70,12 @@ CORE_UNITS=(
 )
 
 SUDO_KEEPALIVE_PID=""
+LAUNCH_LIB_DIR="$SCRIPT_DIR/launch_lib"
+
+# shellcheck source=src/launch_lib/common.sh
+source "$LAUNCH_LIB_DIR/common.sh"
+# shellcheck source=src/launch_lib/health_classification.sh
+source "$LAUNCH_LIB_DIR/health_classification.sh"
 
 usage() {
   cat <<EOF
@@ -191,27 +197,6 @@ resolve_executable() {
   command -v "$executable"
 }
 
-resolve_path() {
-  local base="$1"
-  local path="$2"
-
-  if [[ "$path" = /* ]]; then
-    printf '%s\n' "$path"
-  else
-    printf '%s\n' "$base/$path"
-  fi
-}
-
-require_file() {
-  local label="$1"
-  local path="$2"
-
-  if [[ ! -f "$path" ]]; then
-    echo "$label not found: $path" >&2
-    exit 1
-  fi
-}
-
 require_supervised_runtime_prereqs() {
   if [[ "$MODE" != "supervised" || "$DRY_RUN" == "1" ]]; then
     return 0
@@ -259,78 +244,6 @@ find_terminal_emulator() {
   done
 
   return 1
-}
-
-join_by() {
-  local separator="$1"
-  shift
-
-  if [[ $# -eq 0 ]]; then
-    return 0
-  fi
-
-  local first="$1"
-  shift
-
-  printf '%s' "$first"
-  for item in "$@"; do
-    printf '%s%s' "$separator" "$item"
-  done
-}
-
-resolve_config_list() {
-  local base="$1"
-  local raw_list="$2"
-  local -n output_ref="$3"
-  local item
-
-  IFS=':' read -r -a output_ref <<< "$raw_list"
-  for item in "${!output_ref[@]}"; do
-    output_ref[$item]="$(resolve_path "$base" "${output_ref[$item]}")"
-  done
-}
-
-read_netns() {
-  local config_path="$1"
-
-  awk -F '=' '
-    /^[[:space:]]*netns[[:space:]]*=/ {
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
-      print $2
-      exit
-    }
-  ' "$config_path"
-}
-
-read_ip_devname() {
-  local config_path="$1"
-
-  awk -F '=' '
-    /^[[:space:]]*ip_devname[[:space:]]*=/ {
-      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
-      print $2
-      exit
-    }
-  ' "$config_path"
-}
-
-config_label() {
-  local label
-
-  label="$(basename -- "$1")"
-  label="${label%.yaml}"
-  label="${label%.conf.txt}"
-  label="${label#gnb_}"
-  label="${label%_zmq}"
-  printf '%s\n' "$label"
-}
-
-root_unit_name() {
-  printf '%s\n' "${UNIT_PREFIX}-$1.service"
-}
-
-user_unit_name() {
-  printf '%s\n' "${UNIT_PREFIX}-$1.service"
 }
 
 read_metrics_source_ids() {
@@ -941,73 +854,6 @@ wait_for_core_readiness() {
     echo "Failed active endpoint probes: $(join_by ', ' "${missing_endpoint_probes[@]}")"
   fi
   return 1
-}
-
-classify_attach_failure_line() {
-  local line="$1"
-  local line_lower
-
-  line_lower="$(printf '%s' "$line" | tr '[:upper:]' '[:lower:]')"
-
-  if [[ "$line_lower" == *"cannot discover"* || "$line_lower" == *"http response error [status:5"* || "$line_lower" == *"http response error [5"* ]]; then
-    echo "core-discovery"
-    return
-  fi
-
-  if [[ "$line_lower" == *"registration reject"* || "$line_lower" == *"attach reject"* ]]; then
-    echo "registration-reject"
-    return
-  fi
-
-  if [[ "$line_lower" == *"pdu session"* ]]; then
-    if [[ "$line_lower" == *"reject"* || "$line_lower" == *"fail"* || "$line_lower" == *"error"* || "$line_lower" == *"release"* ]]; then
-      echo "pdu-session"
-      return
-    fi
-  fi
-
-  if [[ "$line_lower" == *"rrc release"* ]]; then
-    echo "rrc-release"
-    return
-  fi
-
-  echo "unknown"
-}
-
-print_attach_failure_summary() {
-  local -n failures_ref="$1"
-  local entry
-  local category
-  local -A counts=()
-  local -a ordered_categories=(
-    "core-discovery"
-    "registration-reject"
-    "pdu-session"
-    "rrc-release"
-    "unknown"
-  )
-
-  for entry in "${failures_ref[@]}"; do
-    category="${entry#[}"
-    if [[ "$category" == "$entry" ]]; then
-      category="unknown"
-    else
-      category="${category%%]*}"
-    fi
-    counts["$category"]=$(( ${counts["$category"]:-0} + 1 ))
-  done
-
-  echo "Attach/PDU failure category summary:"
-  for category in "${ordered_categories[@]}"; do
-    if [[ -n "${counts[$category]:-}" ]]; then
-      echo "  ${category}: ${counts[$category]}"
-      unset 'counts[$category]'
-    fi
-  done
-
-  for category in "${!counts[@]}"; do
-    echo "  ${category}: ${counts[$category]}"
-  done
 }
 
 collect_attach_failure_signals_since() {
