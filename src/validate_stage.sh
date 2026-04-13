@@ -174,14 +174,22 @@ validate_metrics() {
   local start_line="$1"
   shift
 
-  "$PYTHON_BIN" - "$METRICS_OUT" "$start_line" "$@" <<'PY'
+  "$PYTHON_BIN" - "$METRICS_OUT" "$start_line" "$REPO_ROOT" "$@" <<'PY'
 import json
 import sys
 from pathlib import Path
 
 metrics_path = Path(sys.argv[1])
 start_line = int(sys.argv[2])
-required_sources = sys.argv[3:]
+repo_root = Path(sys.argv[3]).resolve()
+required_sources = sys.argv[4:]
+
+sys.path.insert(0, str(repo_root / "src"))
+
+try:
+    from metrics_identity import build_ue_identity
+except Exception as exc:  # pragma: no cover - runtime safety in shell-embedded script
+    raise SystemExit(f"Unable to import shared metrics identity helper: {exc}")
 
 if not metrics_path.exists():
     raise SystemExit(f"Metrics file not found: {metrics_path}")
@@ -191,18 +199,6 @@ positive = {
     source_id: {}
     for source_id in required_sources
 }
-
-
-def build_entity_id(ue_metrics, cell_index, ue_index):
-    ue_value = ue_metrics.get("ue")
-    if ue_value not in (None, ""):
-        return f"ue:{ue_value}"
-
-    rnti_value = ue_metrics.get("rnti")
-    if rnti_value not in (None, ""):
-        return f"rnti:{rnti_value}"
-
-    return f"cell{cell_index}-ue{ue_index}"
 
 with metrics_path.open(encoding="utf-8") as handle:
     for line_number, line in enumerate(handle, start=1):
@@ -234,19 +230,19 @@ with metrics_path.open(encoding="utf-8") as handle:
                 continue
 
             for ue_index, ue in enumerate(ue_list):
-                if not isinstance(ue, dict):
-                    continue
+              if not isinstance(ue, dict):
+                continue
 
-                entity_id = build_entity_id(ue, cell_index, ue_index)
-                state = positive[source_id].setdefault(
-                    entity_id,
-                    {"dl": False, "ul": False},
-                )
+              entity_id = build_ue_identity(ue, cell_index, ue_index)
+              state = positive[source_id].setdefault(
+                entity_id,
+                {"dl": False, "ul": False},
+              )
 
-                if float(ue.get("dl_brate", 0) or 0) > 0:
-                    state["dl"] = True
-                if float(ue.get("ul_brate", 0) or 0) > 0:
-                    state["ul"] = True
+              if float(ue.get("dl_brate", 0) or 0) > 0:
+                state["dl"] = True
+              if float(ue.get("ul_brate", 0) or 0) > 0:
+                state["ul"] = True
 
 missing_sources = [source_id for source_id in required_sources if source_id not in seen_sources]
 missing_entity_samples = [

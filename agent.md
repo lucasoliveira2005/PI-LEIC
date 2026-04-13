@@ -35,7 +35,7 @@ ollama pull llama3
 Se já tens `.venv` criado no projeto:
 
 ```bash
-source .venv/bin/activate
+source src/.venv/bin/activate
 ```
 
 ## 5) Executar o agente

@@ -269,14 +269,22 @@ The collector now supports built-in JSONL rotation/retention with environment va
 - `METRICS_ROTATE_MAX_BYTES` (default `52428800`, 50 MiB)
 - `METRICS_ROTATE_MAX_FILES` (default `5`)
 
+The collector also supports a SQLite cache path used by dashboards and fast API
+queries:
+
+- `METRICS_SQLITE_ENABLED` (default `1`)
+- `METRICS_SQLITE_PATH` (default `/tmp/pi-leic-metrics.sqlite`)
+- `METRICS_SQLITE_TIMEOUT_SECONDS` (default `5`)
+
 When rotation is enabled, older files are kept as:
 
 - `metrics/gnb_metrics.jsonl.1`
 - `metrics/gnb_metrics.jsonl.2`
 - etc., up to `METRICS_ROTATE_MAX_FILES`
 
-By default, the dashboard reads current plus rotated files through `src/metrics_api.py`.
-You can control this behavior with:
+By default, the dashboard/API path prefers the SQLite cache through
+`src/metrics_api.py`, and falls back to JSONL scanning if SQLite is unavailable.
+For JSONL fallback control:
 
 - `METRICS_LOG_INCLUDE_ROTATED` (default `1`)
 - `METRICS_LOG_MAX_ARCHIVES` (default `5`)
@@ -289,6 +297,10 @@ all cells in the latest event per source, each with:
 - `ue_identity` (derived from `ue`, then `rnti`, then positional fallback)
 - `ue` (the UE metrics payload)
 - optional `pci`
+
+For `cells` events, top-level UE context fields (`ue`, `rnti`, `cell_index`,
+`pci`) should not be treated as authoritative. Use entity lists or
+`raw_payload.cells[*].ue_list[*]` as source of truth.
 
 To confirm the metrics file is growing:
 

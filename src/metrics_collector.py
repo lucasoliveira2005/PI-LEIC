@@ -1,12 +1,18 @@
 #!/usr/bin/env python3
 import json
 import os
+import sqlite3
 import threading
 import time
 from datetime import datetime, timezone
 from pathlib import Path
 
 import websocket
+
+try:
+    from metrics_identity import extract_cell_ue_entities
+except ModuleNotFoundError:
+    from src.metrics_identity import extract_cell_ue_entities
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 SOURCES_CONFIG = Path(
@@ -32,8 +38,38 @@ def parse_non_negative_int_env(name, default):
     return value
 
 
+def parse_non_negative_float_env(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+
+    try:
+        value = float(raw)
+    except ValueError as exc:
+        raise ValueError(f"{name} must be a float, got: {raw}") from exc
+
+    if value < 0:
+        raise ValueError(f"{name} must be >= 0, got: {value}")
+
+    return value
+
+
+def parse_bool_env(name, default):
+    raw = os.environ.get(name)
+    if raw is None:
+        return default
+
+    return raw.strip().lower() not in {"0", "false", "no", "off"}
+
+
 ROTATE_MAX_BYTES = parse_non_negative_int_env("METRICS_ROTATE_MAX_BYTES", 50 * 1024 * 1024)
 ROTATE_MAX_FILES = parse_non_negative_int_env("METRICS_ROTATE_MAX_FILES", 5)
+METRICS_SQLITE_ENABLED = parse_bool_env("METRICS_SQLITE_ENABLED", True)
+METRICS_SQLITE_PATH = Path(os.environ.get("METRICS_SQLITE_PATH", "/tmp/pi-leic-metrics.sqlite"))
+METRICS_SQLITE_TIMEOUT_SECONDS = parse_non_negative_float_env(
+    "METRICS_SQLITE_TIMEOUT_SECONDS",
+    5.0,
+)
 
 
 def load_sources():
@@ -75,21 +111,8 @@ def extract_context(payload):
 
     cells = payload.get("cells") or []
     if cells:
-        first_cell = cells[0]
-        context["cell_index"] = 0
-
-        cell_metrics = first_cell.get("cell_metrics") or {}
-        if "pci" in cell_metrics:
-            context["pci"] = cell_metrics["pci"]
-
-        ue_list = first_cell.get("ue_list") or []
-        if ue_list:
-            first_ue = ue_list[0]
-            if "ue" in first_ue:
-                context["ue"] = first_ue["ue"]
-            if "rnti" in first_ue:
-                context["rnti"] = first_ue["rnti"]
-
+        # For cells payloads, authoritative UE/cell context lives inside raw_payload.
+        # Avoid ambiguous top-level fields derived from the first entity only.
         return context
 
     rlc_metrics = payload.get("rlc_metrics")
@@ -131,30 +154,193 @@ def summarize_event(event):
     source_id = event["source_id"]
 
     if family == "cells":
-        cells = payload.get("cells") or []
-        if cells:
-            ue_list = cells[0].get("ue_list") or []
-            if ue_list:
-                ue = ue_list[0]
-                snr = ue.get("pucch_snr_db", ue.get("pusch_snr_db", 0))
-                return (
-                    f"[{source_id}] cells "
-                    f"pci={event.get('pci', '-')}"
-                    f" ue={event.get('ue', '-')}"
-                    f" dl={ue.get('dl_brate', 0):.1f}"
-                    f" ul={ue.get('ul_brate', 0):.1f}"
-                    f" snr={snr:.2f}"
-                )
+        entities = extract_cell_ue_entities(payload)
+        if entities:
+            sample = entities[0]
+            sample_ue = sample.get("ue") or {}
+            snr = sample_ue.get("pucch_snr_db", sample_ue.get("pusch_snr_db", 0))
+            return (
+                f"[{source_id}] cells "
+                f"entities={len(entities)}"
+                f" sample={sample.get('ue_identity', '-') }"
+                f" dl={sample_ue.get('dl_brate', 0):.1f}"
+                f" ul={sample_ue.get('ul_brate', 0):.1f}"
+                f" snr={snr:.2f}"
+            )
+
+        return f"[{source_id}] cells entities=0"
 
     return f"[{source_id}] {family} timestamp={event.get('timestamp') or '-'}"
 
 
+class SQLiteEventSink:
+    def __init__(self, db_path, timeout_seconds=5.0):
+        self.db_path = Path(db_path)
+        self.db_path.parent.mkdir(parents=True, exist_ok=True)
+        self.conn = sqlite3.connect(
+            str(self.db_path),
+            timeout=timeout_seconds,
+            check_same_thread=False,
+        )
+        self.conn.execute("PRAGMA journal_mode=WAL")
+        self.conn.execute("PRAGMA synchronous=NORMAL")
+        self.conn.execute("PRAGMA foreign_keys=ON")
+        self._initialize_schema()
+
+    def _initialize_schema(self):
+        with self.conn:
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS metrics_events (
+                    id INTEGER PRIMARY KEY AUTOINCREMENT,
+                    collector_timestamp TEXT NOT NULL,
+                    source_id TEXT NOT NULL,
+                    gnb_id TEXT,
+                    ws_url TEXT,
+                    metric_family TEXT,
+                    event_timestamp TEXT,
+                    raw_json TEXT NOT NULL
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE TABLE IF NOT EXISTS metrics_cell_entities (
+                    event_id INTEGER NOT NULL,
+                    source_id TEXT NOT NULL,
+                    collector_timestamp TEXT NOT NULL,
+                    event_timestamp TEXT,
+                    cell_index INTEGER NOT NULL,
+                    ue_index INTEGER NOT NULL,
+                    ue_identity TEXT NOT NULL,
+                    pci INTEGER,
+                    dl_brate REAL,
+                    ul_brate REAL,
+                    signal_db REAL,
+                    ue_json TEXT NOT NULL,
+                    PRIMARY KEY (event_id, cell_index, ue_index),
+                    FOREIGN KEY (event_id) REFERENCES metrics_events(id) ON DELETE CASCADE
+                )
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_metrics_events_source_collector
+                ON metrics_events(source_id, collector_timestamp DESC)
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_metrics_events_family_collector
+                ON metrics_events(metric_family, collector_timestamp DESC)
+                """
+            )
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_metrics_cell_entities_latest
+                ON metrics_cell_entities(source_id, collector_timestamp DESC, cell_index, ue_identity)
+                """
+            )
+
+    def write_event(self, event):
+        collector_timestamp = event.get("collector_timestamp") or datetime.now(timezone.utc).isoformat()
+        metric_family = event.get("metric_family") or "unknown"
+        raw_json = json.dumps(event, ensure_ascii=False)
+
+        with self.conn:
+            cursor = self.conn.execute(
+                """
+                INSERT INTO metrics_events (
+                    collector_timestamp,
+                    source_id,
+                    gnb_id,
+                    ws_url,
+                    metric_family,
+                    event_timestamp,
+                    raw_json
+                ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                """,
+                (
+                    collector_timestamp,
+                    event.get("source_id"),
+                    event.get("gnb_id"),
+                    event.get("ws_url"),
+                    metric_family,
+                    event.get("timestamp"),
+                    raw_json,
+                ),
+            )
+            event_id = cursor.lastrowid
+
+            if metric_family != "cells":
+                return
+
+            payload = event.get("raw_payload")
+            if not isinstance(payload, dict):
+                return
+
+            entities = extract_cell_ue_entities(payload)
+            for entity in entities:
+                ue_metrics = entity.get("ue") or {}
+                signal_db = ue_metrics.get("pucch_snr_db", ue_metrics.get("pusch_snr_db"))
+                self.conn.execute(
+                    """
+                    INSERT OR REPLACE INTO metrics_cell_entities (
+                        event_id,
+                        source_id,
+                        collector_timestamp,
+                        event_timestamp,
+                        cell_index,
+                        ue_index,
+                        ue_identity,
+                        pci,
+                        dl_brate,
+                        ul_brate,
+                        signal_db,
+                        ue_json
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)
+                    """,
+                    (
+                        event_id,
+                        event.get("source_id"),
+                        collector_timestamp,
+                        event.get("timestamp"),
+                        entity.get("cell_index", 0),
+                        entity.get("ue_index", 0),
+                        entity.get("ue_identity", "cell0-ue0"),
+                        entity.get("pci"),
+                        float(ue_metrics.get("dl_brate", 0) or 0),
+                        float(ue_metrics.get("ul_brate", 0) or 0),
+                        float(signal_db) if signal_db is not None else None,
+                        json.dumps(ue_metrics, ensure_ascii=False),
+                    ),
+                )
+
+
 class EventWriter:
-    def __init__(self, output_path, rotate_max_bytes=0, rotate_max_files=0):
+    def __init__(
+        self,
+        output_path,
+        rotate_max_bytes=0,
+        rotate_max_files=0,
+        sqlite_enabled=False,
+        sqlite_path=None,
+        sqlite_timeout_seconds=5.0,
+    ):
         self.output_path = output_path
         self.rotate_max_bytes = max(0, rotate_max_bytes)
         self.rotate_max_files = max(0, rotate_max_files)
         self.lock = threading.Lock()
+        self.sqlite_sink = None
+
+        if sqlite_enabled and sqlite_path is not None:
+            try:
+                self.sqlite_sink = SQLiteEventSink(
+                    sqlite_path,
+                    timeout_seconds=sqlite_timeout_seconds,
+                )
+            except Exception as exc:
+                print(f"SQLite sink disabled: {exc}", flush=True)
 
     def _rotated_path(self, index):
         return self.output_path.with_name(f"{self.output_path.name}.{index}")
@@ -188,6 +374,13 @@ class EventWriter:
             with self.output_path.open("a", encoding="utf-8") as f:
                 f.write(line + "\n")
                 f.flush()
+
+            if self.sqlite_sink is not None:
+                try:
+                    self.sqlite_sink.write_event(event)
+                except Exception as exc:
+                    print(f"SQLite sink write failed; disabling SQLite path: {exc}", flush=True)
+                    self.sqlite_sink = None
 
 
 class MetricsSourceWorker:
@@ -254,6 +447,9 @@ def main():
         OUT,
         rotate_max_bytes=ROTATE_MAX_BYTES,
         rotate_max_files=ROTATE_MAX_FILES,
+        sqlite_enabled=METRICS_SQLITE_ENABLED,
+        sqlite_path=METRICS_SQLITE_PATH,
+        sqlite_timeout_seconds=METRICS_SQLITE_TIMEOUT_SECONDS,
     )
 
     print(f"Metrics collector ready. Sources: {SOURCES_CONFIG.resolve()}", flush=True)
@@ -267,6 +463,16 @@ def main():
         )
     else:
         print("Rotation disabled for metrics output.", flush=True)
+
+    if METRICS_SQLITE_ENABLED:
+        print(
+            "SQLite cache enabled: "
+            f"METRICS_SQLITE_PATH={METRICS_SQLITE_PATH} "
+            f"(timeout={METRICS_SQLITE_TIMEOUT_SECONDS}s)",
+            flush=True,
+        )
+    else:
+        print("SQLite cache disabled for metrics output.", flush=True)
 
     threads = []
     for source in sources:
