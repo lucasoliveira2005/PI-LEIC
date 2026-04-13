@@ -45,7 +45,8 @@ This validation run:
   2. launches the multi-gNB stack
   3. sends traffic from each UE namespace to ${PING_TARGET}
   4. confirms fresh metrics from every configured source
-  5. confirms fresh non-zero dl_brate and ul_brate for every configured source
+  5. confirms fresh non-zero dl_brate and ul_brate for all observed UE entities
+     in every configured source
 
 Options:
   --skip-provision  Reuse existing subscribers.
@@ -187,9 +188,21 @@ if not metrics_path.exists():
 
 seen_sources = set()
 positive = {
-    source_id: {"dl": False, "ul": False}
+    source_id: {}
     for source_id in required_sources
 }
+
+
+def build_entity_id(ue_metrics, cell_index, ue_index):
+    ue_value = ue_metrics.get("ue")
+    if ue_value not in (None, ""):
+        return f"ue:{ue_value}"
+
+    rnti_value = ue_metrics.get("rnti")
+    if rnti_value not in (None, ""):
+        return f"rnti:{rnti_value}"
+
+    return f"cell{cell_index}-ue{ue_index}"
 
 with metrics_path.open(encoding="utf-8") as handle:
     for line_number, line in enumerate(handle, start=1):
@@ -212,31 +225,69 @@ with metrics_path.open(encoding="utf-8") as handle:
         if not cells:
             continue
 
-        ue_list = cells[0].get("ue_list") or []
-        if not ue_list:
-            continue
+        for cell_index, cell in enumerate(cells):
+            if not isinstance(cell, dict):
+                continue
 
-        ue = ue_list[0]
-        if float(ue.get("dl_brate", 0) or 0) > 0:
-            positive[source_id]["dl"] = True
-        if float(ue.get("ul_brate", 0) or 0) > 0:
-            positive[source_id]["ul"] = True
+            ue_list = cell.get("ue_list") or []
+            if not isinstance(ue_list, list):
+                continue
+
+            for ue_index, ue in enumerate(ue_list):
+                if not isinstance(ue, dict):
+                    continue
+
+                entity_id = build_entity_id(ue, cell_index, ue_index)
+                state = positive[source_id].setdefault(
+                    entity_id,
+                    {"dl": False, "ul": False},
+                )
+
+                if float(ue.get("dl_brate", 0) or 0) > 0:
+                    state["dl"] = True
+                if float(ue.get("ul_brate", 0) or 0) > 0:
+                    state["ul"] = True
 
 missing_sources = [source_id for source_id in required_sources if source_id not in seen_sources]
-missing_dl = [source_id for source_id in required_sources if not positive[source_id]["dl"]]
-missing_ul = [source_id for source_id in required_sources if not positive[source_id]["ul"]]
+missing_entity_samples = [
+    source_id
+    for source_id in required_sources
+    if source_id in seen_sources and not positive[source_id]
+]
+missing_dl = []
+missing_ul = []
 
-if missing_sources or missing_dl or missing_ul:
+for source_id in required_sources:
+    for entity_id, state in positive[source_id].items():
+        if not state["dl"]:
+            missing_dl.append(f"{source_id}:{entity_id}")
+        if not state["ul"]:
+            missing_ul.append(f"{source_id}:{entity_id}")
+
+if missing_sources or missing_entity_samples or missing_dl or missing_ul:
     if missing_sources:
         print("Missing fresh metrics from: " + ", ".join(missing_sources), file=sys.stderr)
+    if missing_entity_samples:
+        print(
+            "Missing fresh UE samples in cells metrics from: "
+            + ", ".join(missing_entity_samples),
+            file=sys.stderr,
+        )
     if missing_dl:
-        print("Missing fresh non-zero dl_brate from: " + ", ".join(missing_dl), file=sys.stderr)
+        print("Missing fresh non-zero dl_brate from entities: " + ", ".join(missing_dl), file=sys.stderr)
     if missing_ul:
-        print("Missing fresh non-zero ul_brate from: " + ", ".join(missing_ul), file=sys.stderr)
+        print("Missing fresh non-zero ul_brate from entities: " + ", ".join(missing_ul), file=sys.stderr)
     raise SystemExit(1)
 
 print("Fresh metrics seen from: " + ", ".join(required_sources))
-print("Fresh non-zero dl_brate and ul_brate confirmed for: " + ", ".join(required_sources))
+entity_counts = [
+    f"{source_id} ({len(positive[source_id])} UE entities)"
+    for source_id in required_sources
+]
+print(
+    "Fresh non-zero dl_brate and ul_brate confirmed for observed entities: "
+    + ", ".join(entity_counts)
+)
 PY
 }
 

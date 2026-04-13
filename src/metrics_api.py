@@ -3,11 +3,59 @@ from __future__ import annotations
 
 import json
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, Optional
+from typing import Dict, Iterable, Iterator, List, Optional
 
 
 def extract_payload(entry: Dict) -> Dict:
     return entry.get("raw_payload") or entry.get("payload") or entry
+
+
+def build_ue_identity(ue_metrics: Dict, cell_index: int, ue_index: int) -> str:
+    ue_value = ue_metrics.get("ue")
+    if ue_value not in (None, ""):
+        return f"ue:{ue_value}"
+
+    rnti_value = ue_metrics.get("rnti")
+    if rnti_value not in (None, ""):
+        return f"rnti:{rnti_value}"
+
+    return f"cell{cell_index}-ue{ue_index}"
+
+
+def extract_cell_ue_entities(payload: Dict) -> List[Dict]:
+    cells = payload.get("cells") or []
+    if not isinstance(cells, list):
+        return []
+
+    entities = []
+
+    for cell_index, cell in enumerate(cells):
+        if not isinstance(cell, dict):
+            continue
+
+        cell_metrics = cell.get("cell_metrics") or {}
+        pci = cell_metrics.get("pci") if isinstance(cell_metrics, dict) else None
+
+        ue_list = cell.get("ue_list") or []
+        if not isinstance(ue_list, list):
+            continue
+
+        for ue_index, ue_metrics in enumerate(ue_list):
+            if not isinstance(ue_metrics, dict):
+                continue
+
+            entity = {
+                "cell_index": cell_index,
+                "ue_index": ue_index,
+                "ue_identity": build_ue_identity(ue_metrics, cell_index, ue_index),
+                "ue": dict(ue_metrics),
+            }
+            if pci is not None:
+                entity["pci"] = pci
+
+            entities.append(entity)
+
+    return entities
 
 
 class MetricsLogReader:
@@ -73,17 +121,17 @@ class MetricsLogReader:
             source_id = entry.get("source_id", "single")
             payload = extract_payload(entry)
 
-            cells = payload.get("cells")
-            if not cells:
-                continue
-
-            ue_list = cells[0].get("ue_list") or []
-            if not ue_list:
+            entities = extract_cell_ue_entities(payload)
+            if not entities:
                 continue
 
             latest_by_source[source_id] = {
-                "timestamp": entry.get("timestamp") or payload.get("timestamp"),
-                "ue": ue_list[0],
+                "timestamp": (
+                    entry.get("timestamp")
+                    or payload.get("timestamp")
+                    or entry.get("collector_timestamp")
+                ),
+                "entities": entities,
             }
 
         return latest_by_source

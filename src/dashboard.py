@@ -20,9 +20,9 @@ READER = MetricsLogReader(
 fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
 plt.subplots_adjust(hspace=0.4)
 
-history_by_source = {}
-last_timestamp_by_source = {}
-source_colors = {}
+history_by_entity = {}
+last_timestamp_by_entity = {}
+entity_colors = {}
 palette = [
     "tab:blue",
     "tab:orange",
@@ -33,15 +33,36 @@ palette = [
 ]
 
 
-def get_source_color(source_id):
-    if source_id not in source_colors:
-        source_colors[source_id] = palette[len(source_colors) % len(palette)]
-    return source_colors[source_id]
+def get_entity_color(entity_key):
+    if entity_key not in entity_colors:
+        entity_colors[entity_key] = palette[len(entity_colors) % len(palette)]
+    return entity_colors[entity_key]
 
 
-def append_source_sample(source_id, ue_metrics):
-    history = history_by_source.setdefault(
-        source_id,
+def entity_label(entity_key):
+    source_id, cell_index, ue_identity = entity_key
+    return f"{source_id} c{cell_index} {ue_identity}"
+
+
+def parse_entity_key(source_id, entity):
+    cell_index = entity.get("cell_index", 0)
+    if not isinstance(cell_index, int):
+        try:
+            cell_index = int(cell_index)
+        except (TypeError, ValueError):
+            cell_index = 0
+
+    ue_identity = entity.get("ue_identity")
+    if not ue_identity:
+        ue_index = entity.get("ue_index", 0)
+        ue_identity = f"cell{cell_index}-ue{ue_index}"
+
+    return source_id, cell_index, str(ue_identity)
+
+
+def append_entity_sample(entity_key, ue_metrics):
+    history = history_by_entity.setdefault(
+        entity_key,
         {
             "times": [],
             "dl_rates": [],
@@ -74,56 +95,68 @@ def animate(_):
         return
 
     for source_id, source_metrics in latest_by_source.items():
-        latest_timestamp = source_metrics["timestamp"]
-        if latest_timestamp and last_timestamp_by_source.get(source_id) == latest_timestamp:
-            continue
+        latest_timestamp = source_metrics.get("timestamp")
+        entities = source_metrics.get("entities") or []
 
-        append_source_sample(source_id, source_metrics["ue"])
-        if latest_timestamp:
-            last_timestamp_by_source[source_id] = latest_timestamp
+        for entity in entities:
+            ue_metrics = entity.get("ue") or {}
+            if not isinstance(ue_metrics, dict):
+                continue
+
+            entity_key = parse_entity_key(source_id, entity)
+            if latest_timestamp and last_timestamp_by_entity.get(entity_key) == latest_timestamp:
+                continue
+
+            append_entity_sample(entity_key, ue_metrics)
+            if latest_timestamp:
+                last_timestamp_by_entity[entity_key] = latest_timestamp
 
     # Gráfico de Bitrate
     ax1.clear()
-    for source_id in sorted(history_by_source):
-        history = history_by_source[source_id]
-        color = get_source_color(source_id)
+    for entity_key in sorted(history_by_entity):
+        history = history_by_entity[entity_key]
+        color = get_entity_color(entity_key)
+        label = entity_label(entity_key)
         ax1.plot(
             history["times"],
             history["dl_rates"],
-            label=f"{source_id} DL",
+            label=f"{label} DL",
             color=color,
             linewidth=2,
         )
         ax1.plot(
             history["times"],
             history["ul_rates"],
-            label=f"{source_id} UL",
+            label=f"{label} UL",
             color=color,
             linestyle="--",
             linewidth=2,
         )
     ax1.set_title("Performance de Dados em Tempo Real (5G NR)")
     ax1.set_ylabel("kbps")
-    ax1.legend(loc='upper left')
+    if history_by_entity:
+        ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.3)
 
     # Gráfico de sinal
     ax2.clear()
-    for source_id in sorted(history_by_source):
-        history = history_by_source[source_id]
-        color = get_source_color(source_id)
+    for entity_key in sorted(history_by_entity):
+        history = history_by_entity[entity_key]
+        color = get_entity_color(entity_key)
+        label = entity_label(entity_key)
         ax2.fill_between(history["times"], history["signal_values"], color=color, alpha=0.15)
         ax2.plot(
             history["times"],
             history["signal_values"],
-            label=f"{source_id} PUCCH/PUSCH SNR",
+            label=f"{label} PUCCH/PUSCH SNR",
             color=color,
             linewidth=2,
         )
     ax2.set_title("Qualidade do Sinal")
     ax2.set_ylabel("dB")
     ax2.set_xlabel("Amostras (segundos)")
-    ax2.legend(loc='upper left')
+    if history_by_entity:
+        ax2.legend(loc='upper left')
     ax2.grid(True, alpha=0.3)
 
 # Atualização a cada 1000ms
@@ -135,4 +168,5 @@ if LOG_INCLUDE_ROTATED:
         "Leitura de métricas inclui ficheiros rotacionados "
         f"(até {LOG_MAX_ARCHIVES} arquivos)."
     )
+print("Visualização multi-origem/multi-UE ativa.")
 plt.show()
