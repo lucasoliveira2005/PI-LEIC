@@ -1,5 +1,6 @@
 import importlib.util
 import json
+import sqlite3
 import sys
 import tempfile
 import types
@@ -75,6 +76,38 @@ class EventWriterRotationTests(unittest.TestCase):
         self.assertTrue(archive_1.exists())
         self.assertTrue(archive_2.exists())
         self.assertFalse(archive_3.exists())
+
+    def test_sqlite_sink_recovers_after_transient_write_failure(self):
+        sqlite_path = Path(self.temp_dir.name) / "metrics.sqlite"
+        writer = EventWriter(
+            self.output_file,
+            sqlite_enabled=True,
+            sqlite_path=sqlite_path,
+            sqlite_timeout_seconds=1.0,
+            sqlite_retry_max_failures=3,
+            sqlite_retry_cooldown_seconds=0,
+        )
+
+        class FlakySink:
+            def write_event(self, _event):
+                raise sqlite3.OperationalError("database is locked")
+
+        writer.sqlite_sink = FlakySink()
+
+        writer.write(self._event(1))
+        self.assertIsNone(writer.sqlite_sink)
+        self.assertGreater(writer.sqlite_consecutive_failures, 0)
+
+        writer.write(self._event(2))
+
+        self.assertIsNotNone(writer.sqlite_sink)
+        self.assertEqual(writer.sqlite_consecutive_failures, 0)
+        self.assertEqual(len(self._read_jsonl(self.output_file)), 2)
+
+        with sqlite3.connect(sqlite_path) as conn:
+            event_count = conn.execute("SELECT COUNT(*) FROM metrics_events").fetchone()[0]
+
+        self.assertGreaterEqual(event_count, 1)
 
 
 if __name__ == "__main__":

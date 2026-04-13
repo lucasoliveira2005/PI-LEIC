@@ -2,6 +2,7 @@
 import json
 import os
 import sqlite3
+import sys
 import threading
 import time
 from datetime import datetime, timezone
@@ -9,12 +10,12 @@ from pathlib import Path
 
 import websocket
 
-try:
-    from metrics_identity import extract_cell_ue_entities
-except ModuleNotFoundError:
-    from src.metrics_identity import extract_cell_ue_entities
-
 SCRIPT_DIR = Path(__file__).resolve().parent
+if str(SCRIPT_DIR) not in sys.path:
+    sys.path.insert(0, str(SCRIPT_DIR))
+
+from metrics_identity import extract_cell_ue_entities
+
 SOURCES_CONFIG = Path(
     os.environ.get("METRICS_SOURCES_CONFIG", SCRIPT_DIR / "../config/metrics_sources.json")
 )
@@ -35,6 +36,13 @@ def parse_non_negative_int_env(name, default):
     if value < 0:
         raise ValueError(f"{name} must be >= 0, got: {value}")
 
+    return value
+
+
+def parse_positive_int_env(name, default):
+    value = parse_non_negative_int_env(name, default)
+    if value <= 0:
+        raise ValueError(f"{name} must be > 0, got: {value}")
     return value
 
 
@@ -69,6 +77,14 @@ METRICS_SQLITE_PATH = Path(os.environ.get("METRICS_SQLITE_PATH", "/tmp/pi-leic-m
 METRICS_SQLITE_TIMEOUT_SECONDS = parse_non_negative_float_env(
     "METRICS_SQLITE_TIMEOUT_SECONDS",
     5.0,
+)
+METRICS_SQLITE_RETRY_MAX_FAILURES = parse_positive_int_env(
+    "METRICS_SQLITE_RETRY_MAX_FAILURES",
+    5,
+)
+METRICS_SQLITE_RETRY_COOLDOWN_SECONDS = parse_non_negative_float_env(
+    "METRICS_SQLITE_RETRY_COOLDOWN_SECONDS",
+    10.0,
 )
 
 
@@ -326,21 +342,96 @@ class EventWriter:
         sqlite_enabled=False,
         sqlite_path=None,
         sqlite_timeout_seconds=5.0,
+        sqlite_retry_max_failures=5,
+        sqlite_retry_cooldown_seconds=10.0,
     ):
         self.output_path = output_path
         self.rotate_max_bytes = max(0, rotate_max_bytes)
         self.rotate_max_files = max(0, rotate_max_files)
         self.lock = threading.Lock()
+        self.sqlite_enabled = bool(sqlite_enabled and sqlite_path is not None)
+        self.sqlite_path = Path(sqlite_path) if sqlite_path is not None else None
+        self.sqlite_timeout_seconds = sqlite_timeout_seconds
+        self.sqlite_retry_max_failures = max(1, int(sqlite_retry_max_failures))
+        self.sqlite_retry_cooldown_seconds = max(0.0, float(sqlite_retry_cooldown_seconds))
+        self.sqlite_consecutive_failures = 0
+        self.sqlite_next_retry_monotonic = 0.0
         self.sqlite_sink = None
 
-        if sqlite_enabled and sqlite_path is not None:
-            try:
-                self.sqlite_sink = SQLiteEventSink(
-                    sqlite_path,
-                    timeout_seconds=sqlite_timeout_seconds,
+        if self.sqlite_enabled:
+            self._attempt_sqlite_connect(log_on_failure=True)
+
+    def _log_sqlite_failure_threshold(self):
+        if self.sqlite_consecutive_failures == self.sqlite_retry_max_failures:
+            print(
+                "SQLite failure threshold reached; continuing JSONL writes while "
+                "periodically retrying SQLite.",
+                flush=True,
+            )
+
+    def _attempt_sqlite_connect(self, log_on_failure):
+        if not self.sqlite_enabled or self.sqlite_path is None:
+            return False
+
+        try:
+            self.sqlite_sink = SQLiteEventSink(
+                self.sqlite_path,
+                timeout_seconds=self.sqlite_timeout_seconds,
+            )
+            if self.sqlite_consecutive_failures > 0:
+                print(
+                    "SQLite sink recovered after "
+                    f"{self.sqlite_consecutive_failures} consecutive failure(s).",
+                    flush=True,
                 )
-            except Exception as exc:
-                print(f"SQLite sink disabled: {exc}", flush=True)
+            self.sqlite_consecutive_failures = 0
+            self.sqlite_next_retry_monotonic = 0.0
+            return True
+        except Exception as exc:
+            self.sqlite_sink = None
+            self.sqlite_consecutive_failures += 1
+            self.sqlite_next_retry_monotonic = (
+                time.monotonic() + self.sqlite_retry_cooldown_seconds
+            )
+
+            if log_on_failure:
+                print(
+                    "SQLite sink unavailable "
+                    f"(failure {self.sqlite_consecutive_failures}/"
+                    f"{self.sqlite_retry_max_failures}); "
+                    f"retrying in {self.sqlite_retry_cooldown_seconds:.1f}s: {exc}",
+                    flush=True,
+                )
+                self._log_sqlite_failure_threshold()
+
+            return False
+
+    def _write_to_sqlite_with_recovery(self, event):
+        if not self.sqlite_enabled:
+            return
+
+        if self.sqlite_sink is None:
+            if time.monotonic() < self.sqlite_next_retry_monotonic:
+                return
+            if not self._attempt_sqlite_connect(log_on_failure=True):
+                return
+
+        try:
+            self.sqlite_sink.write_event(event)
+        except Exception as exc:
+            self.sqlite_sink = None
+            self.sqlite_consecutive_failures += 1
+            self.sqlite_next_retry_monotonic = (
+                time.monotonic() + self.sqlite_retry_cooldown_seconds
+            )
+            print(
+                "SQLite sink write failed "
+                f"(failure {self.sqlite_consecutive_failures}/"
+                f"{self.sqlite_retry_max_failures}); "
+                f"retrying in {self.sqlite_retry_cooldown_seconds:.1f}s: {exc}",
+                flush=True,
+            )
+            self._log_sqlite_failure_threshold()
 
     def _rotated_path(self, index):
         return self.output_path.with_name(f"{self.output_path.name}.{index}")
@@ -375,12 +466,7 @@ class EventWriter:
                 f.write(line + "\n")
                 f.flush()
 
-            if self.sqlite_sink is not None:
-                try:
-                    self.sqlite_sink.write_event(event)
-                except Exception as exc:
-                    print(f"SQLite sink write failed; disabling SQLite path: {exc}", flush=True)
-                    self.sqlite_sink = None
+            self._write_to_sqlite_with_recovery(event)
 
 
 class MetricsSourceWorker:
@@ -450,6 +536,8 @@ def main():
         sqlite_enabled=METRICS_SQLITE_ENABLED,
         sqlite_path=METRICS_SQLITE_PATH,
         sqlite_timeout_seconds=METRICS_SQLITE_TIMEOUT_SECONDS,
+        sqlite_retry_max_failures=METRICS_SQLITE_RETRY_MAX_FAILURES,
+        sqlite_retry_cooldown_seconds=METRICS_SQLITE_RETRY_COOLDOWN_SECONDS,
     )
 
     print(f"Metrics collector ready. Sources: {SOURCES_CONFIG.resolve()}", flush=True)
@@ -468,7 +556,9 @@ def main():
         print(
             "SQLite cache enabled: "
             f"METRICS_SQLITE_PATH={METRICS_SQLITE_PATH} "
-            f"(timeout={METRICS_SQLITE_TIMEOUT_SECONDS}s)",
+            f"(timeout={METRICS_SQLITE_TIMEOUT_SECONDS}s, "
+            f"retry_max_failures={METRICS_SQLITE_RETRY_MAX_FAILURES}, "
+            f"retry_cooldown={METRICS_SQLITE_RETRY_COOLDOWN_SECONDS}s)",
             flush=True,
         )
     else:

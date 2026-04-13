@@ -164,7 +164,7 @@ It will:
 - apply `config/subscribers.json`
 - launch the full stack
 - send traffic from `ue1` and `ue2` to `10.45.0.1`
-- confirm fresh `source_id` entries for every configured source in `metrics/gnb_metrics.jsonl`
+- confirm fresh metrics for every configured source via the shared reader contract (`src/metrics_api.py`, SQLite-first with JSONL fallback)
 - confirm fresh non-zero `dl_brate` and `ul_brate` for all observed UE entities in every configured source
 
 This is the authoritative end-to-end validation flow. By default it launches the stack in supervised mode, enables dynamic core readiness checks before UE attach (including live socket and active endpoint probes), enables strict launch readiness checks for service and metrics health, fails fast on explicit attach/PDU failure signals with categorized cause summaries, disables the dashboard, defers UE data-path checks to this script, waits for each UE namespace to gain a usable route, and validates after real traffic has been generated. If a stale manual run is still holding ZMQ or NG-U ports, the launcher now cleans up the old PI-LEIC lab processes before starting the supervised units.
@@ -275,6 +275,12 @@ queries:
 - `METRICS_SQLITE_ENABLED` (default `1`)
 - `METRICS_SQLITE_PATH` (default `/tmp/pi-leic-metrics.sqlite`)
 - `METRICS_SQLITE_TIMEOUT_SECONDS` (default `5`)
+- `METRICS_SQLITE_RETRY_MAX_FAILURES` (default `5`)
+- `METRICS_SQLITE_RETRY_COOLDOWN_SECONDS` (default `10`)
+
+If SQLite writes fail transiently (for example temporary lock/contention),
+the collector keeps writing JSONL and retries SQLite after a cooldown window.
+It no longer permanently disables SQLite on the first write error.
 
 When rotation is enabled, older files are kept as:
 

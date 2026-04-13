@@ -7,6 +7,10 @@ REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 METRICS_OUT="${METRICS_OUT:-$REPO_ROOT/metrics/gnb_metrics.jsonl}"
 METRICS_SOURCES_CONFIG="${METRICS_SOURCES_CONFIG:-$REPO_ROOT/config/metrics_sources.json}"
+METRICS_LOG_INCLUDE_ROTATED="${METRICS_LOG_INCLUDE_ROTATED:-1}"
+METRICS_LOG_MAX_ARCHIVES="${METRICS_LOG_MAX_ARCHIVES:-5}"
+METRICS_SQLITE_ENABLED="${METRICS_SQLITE_ENABLED:-1}"
+METRICS_SQLITE_PATH="${METRICS_SQLITE_PATH:-/tmp/pi-leic-metrics.sqlite}"
 PING_TARGET="${PING_TARGET:-10.45.0.1}"
 PING_COUNT="${PING_COUNT:-4}"
 PING_WAIT_SECONDS="${PING_WAIT_SECONDS:-3}"
@@ -56,6 +60,8 @@ Options:
 
 Environment overrides:
   PYTHON_BIN, METRICS_OUT, METRICS_SOURCES_CONFIG, PING_TARGET, PING_COUNT
+  METRICS_LOG_INCLUDE_ROTATED, METRICS_LOG_MAX_ARCHIVES
+  METRICS_SQLITE_ENABLED, METRICS_SQLITE_PATH
   PING_WAIT_SECONDS, NET_READY_TIMEOUT_SECONDS, NET_READY_POLL_SECONDS
   UE_NAMESPACES, LAUNCH_MODE, LAUNCH_DASHBOARD_ENABLED
   LAUNCH_HEALTHCHECK_ENABLED, LAUNCH_HEALTHCHECK_STRICT
@@ -149,14 +155,6 @@ require_file() {
   fi
 }
 
-metrics_line_count() {
-  if [[ -f "$METRICS_OUT" ]]; then
-    wc -l < "$METRICS_OUT"
-  else
-    echo 0
-  fi
-}
-
 load_required_sources() {
   "$PYTHON_BIN" - "$METRICS_SOURCES_CONFIG" <<'PY'
 import json
@@ -170,81 +168,215 @@ for item in data:
 PY
 }
 
-validate_metrics() {
-  local start_line="$1"
+write_baseline_signatures() {
+  local output_file="$1"
   shift
 
-  "$PYTHON_BIN" - "$METRICS_OUT" "$start_line" "$REPO_ROOT" "$@" <<'PY'
+  "$PYTHON_BIN" - \
+  "$REPO_ROOT" \
+  "$METRICS_OUT" \
+  "$METRICS_LOG_INCLUDE_ROTATED" \
+  "$METRICS_LOG_MAX_ARCHIVES" \
+  "$METRICS_SQLITE_ENABLED" \
+  "$METRICS_SQLITE_PATH" \
+  "$@" > "$output_file" <<'PY'
 import json
 import sys
 from pathlib import Path
 
-metrics_path = Path(sys.argv[1])
-start_line = int(sys.argv[2])
-repo_root = Path(sys.argv[3]).resolve()
-required_sources = sys.argv[4:]
+repo_root = Path(sys.argv[1]).resolve()
+metrics_path = Path(sys.argv[2])
+log_include_rotated = sys.argv[3].strip().lower() not in {"0", "false", "no", "off"}
+log_max_archives = int(sys.argv[4])
+sqlite_enabled = sys.argv[5].strip().lower() not in {"0", "false", "no", "off"}
+sqlite_path = Path(sys.argv[6])
+required_sources = sys.argv[7:]
+
+src_dir = repo_root / "src"
+if str(src_dir) not in sys.path:
+  sys.path.insert(0, str(src_dir))
+
+from metrics_api import MetricsLogReader
+
+
+def source_signature(source_entry):
+  entities = source_entry.get("entities") or []
+
+  normalized_entities = []
+  for entity in entities:
+    if not isinstance(entity, dict):
+      continue
+
+    normalized_entities.append(
+      {
+        "cell_index": entity.get("cell_index"),
+        "ue_index": entity.get("ue_index"),
+        "ue_identity": entity.get("ue_identity"),
+        "pci": entity.get("pci"),
+        "ue": entity.get("ue") if isinstance(entity.get("ue"), dict) else {},
+      }
+    )
+
+  normalized_entities.sort(
+    key=lambda item: (
+      item.get("cell_index", 0),
+      item.get("ue_index", 0),
+      str(item.get("ue_identity", "")),
+    )
+  )
+
+  signature_payload = {
+    "timestamp": source_entry.get("timestamp"),
+    "entities": normalized_entities,
+  }
+  return json.dumps(signature_payload, sort_keys=True, ensure_ascii=False)
+
+
+reader = MetricsLogReader(
+  metrics_path,
+  include_rotated=log_include_rotated,
+  max_archives=log_max_archives,
+  sqlite_path=sqlite_path if sqlite_enabled else None,
+  prefer_sqlite=sqlite_enabled,
+)
+latest_by_source = reader.latest_cells_by_source()
+
+baseline = {}
+for source_id in required_sources:
+  source_entry = latest_by_source.get(source_id)
+  if source_entry:
+    baseline[source_id] = source_signature(source_entry)
+
+print(json.dumps(baseline, sort_keys=True, ensure_ascii=False))
+PY
+}
+
+validate_metrics() {
+  local baseline_file="$1"
+  shift
+
+  "$PYTHON_BIN" - \
+  "$REPO_ROOT" \
+  "$METRICS_OUT" \
+  "$METRICS_LOG_INCLUDE_ROTATED" \
+  "$METRICS_LOG_MAX_ARCHIVES" \
+  "$METRICS_SQLITE_ENABLED" \
+  "$METRICS_SQLITE_PATH" \
+  "$baseline_file" \
+  "$@" <<'PY'
+import json
+import sys
+from pathlib import Path
+
+repo_root = Path(sys.argv[1]).resolve()
+metrics_path = Path(sys.argv[2])
+log_include_rotated = sys.argv[3].strip().lower() not in {"0", "false", "no", "off"}
+log_max_archives = int(sys.argv[4])
+sqlite_enabled = sys.argv[5].strip().lower() not in {"0", "false", "no", "off"}
+sqlite_path = Path(sys.argv[6])
+baseline_file = Path(sys.argv[7])
+required_sources = sys.argv[8:]
 
 src_dir = repo_root / "src"
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
 try:
-    from metrics_identity import build_ue_identity
+  from metrics_api import MetricsLogReader
 except Exception as exc:  # pragma: no cover - runtime safety in shell-embedded script
-    raise SystemExit(f"Unable to import shared metrics identity helper: {exc}")
+  raise SystemExit(f"Unable to import shared metrics reader helper: {exc}")
 
-if not metrics_path.exists():
-    raise SystemExit(f"Metrics file not found: {metrics_path}")
+try:
+  baseline_signatures = json.loads(baseline_file.read_text(encoding="utf-8"))
+except FileNotFoundError:
+  baseline_signatures = {}
+except json.JSONDecodeError:
+  baseline_signatures = {}
+
+
+def source_signature(source_entry):
+  entities = source_entry.get("entities") or []
+
+  normalized_entities = []
+  for entity in entities:
+    if not isinstance(entity, dict):
+      continue
+
+    normalized_entities.append(
+      {
+        "cell_index": entity.get("cell_index"),
+        "ue_index": entity.get("ue_index"),
+        "ue_identity": entity.get("ue_identity"),
+        "pci": entity.get("pci"),
+        "ue": entity.get("ue") if isinstance(entity.get("ue"), dict) else {},
+      }
+    )
+
+  normalized_entities.sort(
+    key=lambda item: (
+      item.get("cell_index", 0),
+      item.get("ue_index", 0),
+      str(item.get("ue_identity", "")),
+    )
+  )
+
+  signature_payload = {
+    "timestamp": source_entry.get("timestamp"),
+    "entities": normalized_entities,
+  }
+  return json.dumps(signature_payload, sort_keys=True, ensure_ascii=False)
+
+
+reader = MetricsLogReader(
+  metrics_path,
+  include_rotated=log_include_rotated,
+  max_archives=log_max_archives,
+  sqlite_path=sqlite_path if sqlite_enabled else None,
+  prefer_sqlite=sqlite_enabled,
+)
+latest_by_source = reader.latest_cells_by_source()
 
 seen_sources = set()
 positive = {
-    source_id: {}
-    for source_id in required_sources
+  source_id: {}
+  for source_id in required_sources
 }
+stale_sources = []
 
-with metrics_path.open(encoding="utf-8") as handle:
-    for line_number, line in enumerate(handle, start=1):
-        if line_number <= start_line:
-            continue
+for source_id in required_sources:
+  source_entry = latest_by_source.get(source_id)
+  if source_entry is None:
+    continue
 
-        try:
-            event = json.loads(line)
-        except json.JSONDecodeError:
-            continue
+  seen_sources.add(source_id)
 
-        source_id = event.get("source_id")
-        if source_id not in positive:
-            continue
+  current_signature = source_signature(source_entry)
+  baseline_signature = baseline_signatures.get(source_id)
+  if baseline_signature and baseline_signature == current_signature:
+    stale_sources.append(source_id)
 
-        seen_sources.add(source_id)
+  entities = source_entry.get("entities") or []
+  for entity in entities:
+    if not isinstance(entity, dict):
+      continue
 
-        payload = event.get("raw_payload") or event
-        cells = payload.get("cells") or []
-        if not cells:
-            continue
+    ue_metrics = entity.get("ue") or {}
+    if not isinstance(ue_metrics, dict):
+      continue
 
-        for cell_index, cell in enumerate(cells):
-            if not isinstance(cell, dict):
-                continue
+    entity_id = str(
+      entity.get("ue_identity")
+      or f"cell{entity.get('cell_index', 0)}-ue{entity.get('ue_index', 0)}"
+    )
+    state = positive[source_id].setdefault(
+      entity_id,
+      {"dl": False, "ul": False},
+    )
 
-            ue_list = cell.get("ue_list") or []
-            if not isinstance(ue_list, list):
-                continue
-
-            for ue_index, ue in enumerate(ue_list):
-              if not isinstance(ue, dict):
-                continue
-
-              entity_id = build_ue_identity(ue, cell_index, ue_index)
-              state = positive[source_id].setdefault(
-                entity_id,
-                {"dl": False, "ul": False},
-              )
-
-              if float(ue.get("dl_brate", 0) or 0) > 0:
-                state["dl"] = True
-              if float(ue.get("ul_brate", 0) or 0) > 0:
-                state["ul"] = True
+    if float(ue_metrics.get("dl_brate", 0) or 0) > 0:
+      state["dl"] = True
+    if float(ue_metrics.get("ul_brate", 0) or 0) > 0:
+      state["ul"] = True
 
 missing_sources = [source_id for source_id in required_sources if source_id not in seen_sources]
 missing_entity_samples = [
@@ -256,26 +388,31 @@ missing_dl = []
 missing_ul = []
 
 for source_id in required_sources:
-    for entity_id, state in positive[source_id].items():
-        if not state["dl"]:
-            missing_dl.append(f"{source_id}:{entity_id}")
-        if not state["ul"]:
-            missing_ul.append(f"{source_id}:{entity_id}")
+  for entity_id, state in positive[source_id].items():
+    if not state["dl"]:
+      missing_dl.append(f"{source_id}:{entity_id}")
+    if not state["ul"]:
+      missing_ul.append(f"{source_id}:{entity_id}")
 
-if missing_sources or missing_entity_samples or missing_dl or missing_ul:
-    if missing_sources:
-        print("Missing fresh metrics from: " + ", ".join(missing_sources), file=sys.stderr)
-    if missing_entity_samples:
-        print(
-            "Missing fresh UE samples in cells metrics from: "
-            + ", ".join(missing_entity_samples),
-            file=sys.stderr,
-        )
-    if missing_dl:
-        print("Missing fresh non-zero dl_brate from entities: " + ", ".join(missing_dl), file=sys.stderr)
-    if missing_ul:
-        print("Missing fresh non-zero ul_brate from entities: " + ", ".join(missing_ul), file=sys.stderr)
-    raise SystemExit(1)
+if missing_sources or stale_sources or missing_entity_samples or missing_dl or missing_ul:
+  if missing_sources:
+    print("Missing fresh metrics from: " + ", ".join(missing_sources), file=sys.stderr)
+  if stale_sources:
+    print(
+      "No new metrics since validation baseline from: " + ", ".join(stale_sources),
+      file=sys.stderr,
+    )
+  if missing_entity_samples:
+    print(
+      "Missing fresh UE samples in cells metrics from: "
+      + ", ".join(missing_entity_samples),
+      file=sys.stderr,
+    )
+  if missing_dl:
+    print("Missing fresh non-zero dl_brate from entities: " + ", ".join(missing_dl), file=sys.stderr)
+  if missing_ul:
+    print("Missing fresh non-zero ul_brate from entities: " + ", ".join(missing_ul), file=sys.stderr)
+  raise SystemExit(1)
 
 print("Fresh metrics seen from: " + ", ".join(required_sources))
 entity_counts = [
@@ -330,6 +467,9 @@ require_file "Metrics sources config" "$METRICS_SOURCES_CONFIG"
 
 cd "$REPO_ROOT"
 
+BASELINE_SIGNATURES_FILE="$(mktemp)"
+trap 'rm -f "$BASELINE_SIGNATURES_FILE"' EXIT
+
 IFS=':' read -r -a UE_NAMESPACES <<< "$UE_NAMESPACES_RAW"
 mapfile -t REQUIRED_SOURCES < <(load_required_sources)
 
@@ -338,9 +478,9 @@ if [[ ${#REQUIRED_SOURCES[@]} -eq 0 ]]; then
   exit 1
 fi
 
-START_LINE="$(metrics_line_count)"
+write_baseline_signatures "$BASELINE_SIGNATURES_FILE" "${REQUIRED_SOURCES[@]}"
 
-echo "Validation baseline: metrics file line ${START_LINE}"
+echo "Validation baseline captured for required sources."
 echo "Required sources: $(IFS=', '; echo "${REQUIRED_SOURCES[*]}")"
 echo "UE namespaces: $(IFS=', '; echo "${UE_NAMESPACES[*]}")"
 
@@ -382,6 +522,6 @@ echo "Waiting ${PING_WAIT_SECONDS}s for fresh traffic metrics..."
 sleep "$PING_WAIT_SECONDS"
 
 echo "Validating fresh metrics..."
-validate_metrics "$START_LINE" "${REQUIRED_SOURCES[@]}"
+validate_metrics "$BASELINE_SIGNATURES_FILE" "${REQUIRED_SOURCES[@]}"
 
 echo "Validation run passed."

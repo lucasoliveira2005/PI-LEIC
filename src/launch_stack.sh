@@ -16,6 +16,10 @@ METRICS_SCRIPT="${METRICS_SCRIPT:-metrics_collector.py}"
 DASHBOARD_SCRIPT="${DASHBOARD_SCRIPT:-dashboard.py}"
 METRICS_SOURCES_CONFIG="${METRICS_SOURCES_CONFIG:-$SCRIPT_DIR/../config/metrics_sources.json}"
 METRICS_OUT="${METRICS_OUT:-$SCRIPT_DIR/../metrics/gnb_metrics.jsonl}"
+METRICS_LOG_INCLUDE_ROTATED="${METRICS_LOG_INCLUDE_ROTATED:-1}"
+METRICS_LOG_MAX_ARCHIVES="${METRICS_LOG_MAX_ARCHIVES:-5}"
+METRICS_SQLITE_ENABLED="${METRICS_SQLITE_ENABLED:-1}"
+METRICS_SQLITE_PATH="${METRICS_SQLITE_PATH:-/tmp/pi-leic-metrics.sqlite}"
 GNB_BIN="${GNB_BIN:-gnb}"
 UE_BIN="${UE_BIN:-srsue}"
 GNB_CONFIGS="${GNB_CONFIGS:-$SCRIPT_DIR/../config/gnb_gnb1_zmq.yaml:$SCRIPT_DIR/../config/gnb_gnb2_zmq.yaml}"
@@ -70,12 +74,17 @@ CORE_UNITS=(
 )
 
 SUDO_KEEPALIVE_PID=""
+HEALTHCHECK_METRICS_BASELINE_FILE=""
 LAUNCH_LIB_DIR="$SCRIPT_DIR/launch_lib"
 
 # shellcheck source=src/launch_lib/common.sh
 source "$LAUNCH_LIB_DIR/common.sh"
 # shellcheck source=src/launch_lib/health_classification.sh
 source "$LAUNCH_LIB_DIR/health_classification.sh"
+# shellcheck source=src/launch_lib/metrics_contract.sh
+source "$LAUNCH_LIB_DIR/metrics_contract.sh"
+# shellcheck source=src/launch_lib/health_checks.sh
+source "$LAUNCH_LIB_DIR/health_checks.sh"
 
 usage() {
   cat <<EOF
@@ -96,6 +105,8 @@ Options:
 Environment overrides:
   WORKDIR, MODE, PYTHON_BIN, VENV_DIR, REQUIREMENTS_FILE, METRICS_SCRIPT, DASHBOARD_SCRIPT
   METRICS_SOURCES_CONFIG, METRICS_OUT, GNB_BIN, UE_BIN, GNB_CONFIGS, UE_CONFIGS
+  METRICS_LOG_INCLUDE_ROTATED, METRICS_LOG_MAX_ARCHIVES
+  METRICS_SQLITE_ENABLED, METRICS_SQLITE_PATH
   DASHBOARD_ENABLED, HEALTHCHECK_ENABLED, HEALTHCHECK_STRICT
   HEALTHCHECK_REQUIRE_UE_DATA_PATH, HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS
   HEALTHCHECK_UE_FAILURE_REGEX, HEALTHCHECK_AMF_FAILURE_REGEX
@@ -165,6 +176,10 @@ done
 cleanup() {
   if [[ -n "$SUDO_KEEPALIVE_PID" ]]; then
     kill "$SUDO_KEEPALIVE_PID" >/dev/null 2>&1 || true
+  fi
+
+  if [[ -n "$HEALTHCHECK_METRICS_BASELINE_FILE" ]]; then
+    rm -f "$HEALTHCHECK_METRICS_BASELINE_FILE" >/dev/null 2>&1 || true
   fi
 }
 
@@ -455,27 +470,6 @@ netns_has_default_route() {
   local netns_name="$1"
 
   sudo -n ip netns exec "$netns_name" ip route show default 2>/dev/null | grep -q .
-}
-
-metrics_source_seen_since() {
-  local start_line="$1"
-  local source_id="$2"
-
-  [[ -f "$METRICS_OUT_PATH" ]] || return 1
-
-  tail -n +"$((start_line + 1))" "$METRICS_OUT_PATH" | grep -F "\"source_id\": \"$source_id\"" >/dev/null 2>&1
-}
-
-metrics_attach_seen_since() {
-  local start_line="$1"
-  local source_id="$2"
-
-  [[ -f "$METRICS_OUT_PATH" ]] || return 1
-
-  tail -n +"$((start_line + 1))" "$METRICS_OUT_PATH" \
-    | grep -F "\"source_id\": \"$source_id\"" \
-    | grep -F '"metric_family": "cells"' \
-    | grep -F '"rnti":' >/dev/null 2>&1
 }
 
 prepare_python_env() {
@@ -856,202 +850,6 @@ wait_for_core_readiness() {
   return 1
 }
 
-collect_attach_failure_signals_since() {
-  local since_epoch="$1"
-  local -n failures_ref="$2"
-  local unit
-  local failure_line
-  local category
-
-  failures_ref=()
-
-  failure_line="$(root_file_first_match_since_line "$CORE_AMF_LOG_PATH" "$HEALTHCHECK_AMF_LOG_START_LINE" "$HEALTHCHECK_AMF_FAILURE_REGEX")"
-  if [[ -n "$failure_line" ]]; then
-    category="$(classify_attach_failure_line "$failure_line")"
-    failures_ref+=("[${category}] amf.log: $failure_line")
-  fi
-
-  failure_line="$(root_file_first_match_since_line "$CORE_SMF_LOG_PATH" "$HEALTHCHECK_SMF_LOG_START_LINE" "$HEALTHCHECK_AMF_FAILURE_REGEX")"
-  if [[ -n "$failure_line" ]]; then
-    category="$(classify_attach_failure_line "$failure_line")"
-    failures_ref+=("[${category}] smf.log: $failure_line")
-  fi
-
-  for unit in "${UE_ROOT_UNIT_NAMES[@]}"; do
-    failure_line="$(root_unit_first_match_since_epoch "$unit" "$since_epoch" "$HEALTHCHECK_UE_FAILURE_REGEX")"
-    if [[ -n "$failure_line" ]]; then
-      category="$(classify_attach_failure_line "$failure_line")"
-      failures_ref+=("[${category}] ${unit}: ${failure_line}")
-    fi
-  done
-
-  [[ ${#failures_ref[@]} -gt 0 ]]
-}
-
-run_health_checks() {
-  local start_line="$1"
-  local deadline=$((SECONDS + HEALTHCHECK_TIMEOUT_SECONDS))
-  local require_ue_data_path="$HEALTHCHECK_REQUIRE_UE_DATA_PATH"
-  local healthcheck_since_epoch="${HEALTHCHECK_START_EPOCH:-0}"
-  local attach_failure_reported=0
-  local -a missing_sources=()
-  local -a missing_attach=()
-  local -a missing_netns=()
-  local -a missing_netdev_ipv4=()
-  local -a missing_default_routes=()
-  local -a inactive_root_units=()
-  local -a inactive_user_units=()
-  local -a attach_failure_signals=()
-  local -a last_attach_failure_signals=()
-  local source_id
-  local ue_netns
-  local ue_device
-  local unit
-  local checks_ready
-
-  if [[ "$HEALTHCHECK_ENABLED" != "1" ]]; then
-    return 0
-  fi
-
-  if [[ ! "$healthcheck_since_epoch" =~ ^[0-9]+$ ]]; then
-    healthcheck_since_epoch="$(date +%s)"
-  elif (( healthcheck_since_epoch <= 0 )); then
-    healthcheck_since_epoch="$(date +%s)"
-  fi
-
-  echo "Running launch readiness checks for up to ${HEALTHCHECK_TIMEOUT_SECONDS}s..."
-
-  while (( SECONDS < deadline )); do
-    missing_sources=()
-    missing_attach=()
-    missing_netns=()
-    missing_netdev_ipv4=()
-    missing_default_routes=()
-    inactive_root_units=()
-    inactive_user_units=()
-
-    for source_id in "${METRICS_SOURCE_IDS[@]}"; do
-      if ! metrics_source_seen_since "$start_line" "$source_id"; then
-        missing_sources+=("$source_id")
-      fi
-      if ! metrics_attach_seen_since "$start_line" "$source_id"; then
-        missing_attach+=("$source_id")
-      fi
-    done
-
-    for ue_netns in "${UE_NETNS_LIST[@]}"; do
-      if ! netns_exists "$ue_netns"; then
-        missing_netns+=("$ue_netns")
-        continue
-      fi
-
-      ue_device="${UE_NETNS_DEVICE_MAP[$ue_netns]:-}"
-      if ! netns_device_has_ipv4 "$ue_netns" "$ue_device"; then
-        missing_netdev_ipv4+=("${ue_netns}:${ue_device}")
-      fi
-      if ! netns_has_default_route "$ue_netns"; then
-        missing_default_routes+=("$ue_netns")
-      fi
-    done
-
-    for unit in "${HEALTHCHECK_ROOT_UNITS[@]}"; do
-      if ! sudo -n systemctl is-active --quiet "$unit" >/dev/null 2>&1; then
-        inactive_root_units+=("$unit")
-      fi
-    done
-
-    for unit in "${HEALTHCHECK_USER_UNITS[@]}"; do
-      if ! systemctl --user is-active --quiet "$unit" >/dev/null 2>&1; then
-        inactive_user_units+=("$unit")
-      fi
-    done
-
-    if collect_attach_failure_signals_since "$healthcheck_since_epoch" attach_failure_signals; then
-      last_attach_failure_signals=("${attach_failure_signals[@]}")
-      if [[ "$attach_failure_reported" == "0" ]]; then
-        echo "Detected attach/PDU failure signals while waiting for readiness:"
-        for source_id in "${attach_failure_signals[@]}"; do
-          echo "  ${source_id}"
-        done
-        print_attach_failure_summary last_attach_failure_signals
-        attach_failure_reported=1
-      fi
-
-      if [[ "$HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS" == "1" ]]; then
-        echo "Failing launch readiness early due to explicit attach/PDU failure signals."
-        return 1
-      fi
-    fi
-
-    checks_ready=1
-    if [[ ${#missing_sources[@]} -gt 0 || ${#missing_attach[@]} -gt 0 || ${#missing_netns[@]} -gt 0 || ${#inactive_root_units[@]} -gt 0 || ${#inactive_user_units[@]} -gt 0 ]]; then
-      checks_ready=0
-    fi
-    if [[ "$require_ue_data_path" == "1" && ( ${#missing_netdev_ipv4[@]} -gt 0 || ${#missing_default_routes[@]} -gt 0 ) ]]; then
-      checks_ready=0
-    fi
-
-    if [[ "$checks_ready" == "1" ]]; then
-      echo "Launch readiness checks passed."
-      echo "Fresh metrics observed from: $(join_by ', ' "${METRICS_SOURCE_IDS[@]}")"
-      echo "UE namespaces present: $(join_by ', ' "${UE_NETNS_LIST[@]}")"
-      echo "Attach-like cells metrics observed from: $(join_by ', ' "${METRICS_SOURCE_IDS[@]}")"
-      if [[ "$require_ue_data_path" == "1" ]]; then
-        echo "UE namespace data path ready: $(join_by ', ' "${UE_NETNS_LIST[@]}")"
-      else
-        echo "UE namespace data path checks deferred (HEALTHCHECK_REQUIRE_UE_DATA_PATH=0)."
-      fi
-      if [[ ${#HEALTHCHECK_ROOT_UNITS[@]} -gt 0 ]]; then
-        echo "Required supervised root units active: $(join_by ', ' "${HEALTHCHECK_ROOT_UNITS[@]}")"
-      fi
-      if [[ ${#HEALTHCHECK_USER_UNITS[@]} -gt 0 ]]; then
-        echo "Required supervised user units active: $(join_by ', ' "${HEALTHCHECK_USER_UNITS[@]}")"
-      fi
-      return 0
-    fi
-
-    sleep "$HEALTHCHECK_POLL_SECONDS"
-  done
-
-  echo "Launch readiness checks completed with warnings."
-  if [[ ${#missing_sources[@]} -gt 0 ]]; then
-    echo "No fresh metrics observed from: $(join_by ', ' "${missing_sources[@]}")"
-  fi
-  if [[ ${#missing_attach[@]} -gt 0 ]]; then
-    echo "No attach-like cells metrics observed from: $(join_by ', ' "${missing_attach[@]}")"
-  fi
-  if [[ ${#missing_netns[@]} -gt 0 ]]; then
-    echo "Missing UE namespaces: $(join_by ', ' "${missing_netns[@]}")"
-  fi
-  if [[ "$require_ue_data_path" == "1" ]]; then
-    if [[ ${#missing_netdev_ipv4[@]} -gt 0 ]]; then
-      echo "UE namespaces missing IPv4 on configured tunnel device: $(join_by ', ' "${missing_netdev_ipv4[@]}")"
-    fi
-    if [[ ${#missing_default_routes[@]} -gt 0 ]]; then
-      echo "UE namespaces missing default route: $(join_by ', ' "${missing_default_routes[@]}")"
-    fi
-  elif [[ ${#missing_netdev_ipv4[@]} -gt 0 || ${#missing_default_routes[@]} -gt 0 ]]; then
-    echo "UE data-path checks were deferred in launch readiness (HEALTHCHECK_REQUIRE_UE_DATA_PATH=0)."
-  fi
-  if [[ ${#inactive_root_units[@]} -gt 0 ]]; then
-    echo "Inactive or missing supervised root units: $(join_by ', ' "${inactive_root_units[@]}")"
-  fi
-  if [[ ${#inactive_user_units[@]} -gt 0 ]]; then
-    echo "Inactive or missing supervised user units: $(join_by ', ' "${inactive_user_units[@]}")"
-  fi
-  if [[ "$attach_failure_reported" == "1" ]]; then
-    echo "Attach/PDU failure signals were detected during readiness checks."
-    if [[ ${#last_attach_failure_signals[@]} -gt 0 ]]; then
-      print_attach_failure_summary last_attach_failure_signals
-    fi
-  fi
-  echo "Use '$0 --status' or '$0 --logs <component>' to inspect the supervised stack."
-
-  if [[ "$HEALTHCHECK_STRICT" == "1" ]]; then
-    return 1
-  fi
-}
-
 stop_user_unit_if_exists() {
   local unit="$1"
   systemctl --user stop "$unit" >/dev/null 2>&1 || true
@@ -1178,6 +976,13 @@ start_supervised_stack() {
   stop_supervised_stack 1
   cleanup_stale_lab_processes
   start_line="$(metrics_line_count)"
+
+  if [[ -n "$HEALTHCHECK_METRICS_BASELINE_FILE" ]]; then
+    rm -f "$HEALTHCHECK_METRICS_BASELINE_FILE" >/dev/null 2>&1 || true
+  fi
+  HEALTHCHECK_METRICS_BASELINE_FILE="$(mktemp)"
+  metrics_contract_write_baseline_signatures "$HEALTHCHECK_METRICS_BASELINE_FILE" "${METRICS_SOURCE_IDS[@]}"
+
   HEALTHCHECK_START_EPOCH="$(date +%s)"
   HEALTHCHECK_AMF_LOG_START_LINE="$(root_file_line_count "$CORE_AMF_LOG_PATH")"
   amf_log_start_line="$HEALTHCHECK_AMF_LOG_START_LINE"
@@ -1210,10 +1015,15 @@ start_supervised_stack() {
   collector_args=(
     "--setenv=METRICS_SOURCES_CONFIG=$METRICS_SOURCES_CONFIG_PATH"
     "--setenv=METRICS_OUT=$METRICS_OUT_PATH"
+    "--setenv=METRICS_SQLITE_ENABLED=$METRICS_SQLITE_ENABLED"
+    "--setenv=METRICS_SQLITE_PATH=$METRICS_SQLITE_PATH"
     "$VENV_DIR_PATH/bin/python"
     -u
     "$METRICS_SCRIPT_PATH"
   )
+  append_env_arg_if_set collector_args METRICS_SQLITE_TIMEOUT_SECONDS
+  append_env_arg_if_set collector_args METRICS_SQLITE_RETRY_MAX_FAILURES
+  append_env_arg_if_set collector_args METRICS_SQLITE_RETRY_COOLDOWN_SECONDS
   start_user_unit "$collector_unit" "PI-LEIC Metrics Collector" "${collector_args[@]}"
 
   if [[ "$DASHBOARD_ENABLED" == "1" ]]; then
@@ -1305,6 +1115,13 @@ start_terminal_stack() {
   stop_supervised_stack 1
   cleanup_stale_lab_processes
   start_line="$(metrics_line_count)"
+
+  if [[ -n "$HEALTHCHECK_METRICS_BASELINE_FILE" ]]; then
+    rm -f "$HEALTHCHECK_METRICS_BASELINE_FILE" >/dev/null 2>&1 || true
+  fi
+  HEALTHCHECK_METRICS_BASELINE_FILE="$(mktemp)"
+  metrics_contract_write_baseline_signatures "$HEALTHCHECK_METRICS_BASELINE_FILE" "${METRICS_SOURCE_IDS[@]}"
+
   HEALTHCHECK_START_EPOCH="$(date +%s)"
   HEALTHCHECK_AMF_LOG_START_LINE="$(root_file_line_count "$CORE_AMF_LOG_PATH")"
   HEALTHCHECK_SMF_LOG_START_LINE="$(root_file_line_count "$CORE_SMF_LOG_PATH")"
@@ -1324,6 +1141,8 @@ EOF
 cd '$WORKDIR'
 export METRICS_SOURCES_CONFIG='$METRICS_SOURCES_CONFIG_PATH'
 export METRICS_OUT='$METRICS_OUT_PATH'
+export METRICS_SQLITE_ENABLED='$METRICS_SQLITE_ENABLED'
+export METRICS_SQLITE_PATH='$METRICS_SQLITE_PATH'
 '$VENV_DIR_PATH/bin/python' -u '$METRICS_SCRIPT_PATH'
 EOF
   )"

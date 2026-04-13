@@ -27,9 +27,12 @@ jobs:
           bash -n src/launch_stack.sh
           bash -n src/launch_lib/common.sh
           bash -n src/launch_lib/health_classification.sh
+          bash -n src/launch_lib/metrics_contract.sh
+          bash -n src/launch_lib/health_checks.sh
           bash -n src/validate_stage.sh
           bash -n tests/test_launch_lib_common.sh
           bash -n tests/test_launch_lib_health_classification.sh
+          bash -n tests/test_launch_lib_metrics_contract.sh
           bash -n tests/test_launch_stack_dry_run_rootless.sh
           bash -n tests/test_validate_stage_rootless.sh
 
@@ -37,6 +40,7 @@ jobs:
         run: |
           bash tests/test_launch_lib_common.sh
           bash tests/test_launch_lib_health_classification.sh
+          bash tests/test_launch_lib_metrics_contract.sh
           bash tests/test_launch_stack_dry_run_rootless.sh
           bash tests/test_validate_stage_rootless.sh
 
