@@ -72,6 +72,7 @@ run_health_checks() {
   fi
 
   echo "Running launch readiness checks for up to ${HEALTHCHECK_TIMEOUT_SECONDS}s..."
+  echo "Freshness mode: ${FRESHNESS_CHECK_MODE} (age window: ${FRESHNESS_AGE_WINDOW_SECONDS}s)"
 
   while (( SECONDS < deadline )); do
     source_seen_map=()
@@ -184,7 +185,7 @@ run_health_checks() {
     echo "No fresh metrics observed from: $(join_by ', ' "${missing_sources[@]}")"
   fi
   if [[ ${#stale_sources[@]} -gt 0 ]]; then
-    echo "No new metrics since launch baseline from: $(join_by ', ' "${stale_sources[@]}")"
+    echo "Metrics freshness criteria not met from: $(join_by ', ' "${stale_sources[@]}")"
   fi
   if [[ ${#missing_attach[@]} -gt 0 ]]; then
     echo "No attach-like cells metrics observed from: $(join_by ', ' "${missing_attach[@]}")"

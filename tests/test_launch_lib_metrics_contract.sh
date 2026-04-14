@@ -49,4 +49,26 @@ JSONL
 second_state="$(metrics_contract_collect_health_states "$baseline_file" gnb1 | head -n 1)"
 assert_eq $'gnb1\t1\t1\t1' "$second_state" "state becomes fresh after new metrics"
 
+steady_file="$tmp_dir/steady_metrics.jsonl"
+cat > "$steady_file" <<'JSONL'
+{"source_id":"gnb1","raw_payload":{"cells":[{"ue_list":[{"rnti":"0x101","dl_brate":400.0,"ul_brate":200.0}]}]}}
+JSONL
+
+METRICS_OUT_PATH="$steady_file"
+steady_baseline="$tmp_dir/steady_baseline.json"
+metrics_contract_write_baseline_signatures "$steady_baseline" gnb1
+
+steady_initial_state="$(metrics_contract_collect_health_states "$steady_baseline" gnb1 | head -n 1)"
+assert_eq $'gnb1\t1\t1\t0' "$steady_initial_state" "steady payload should start stale against its own baseline"
+
+cat >> "$steady_file" <<'JSONL'
+{"source_id":"gnb1","raw_payload":{"cells":[{"ue_list":[{"rnti":"0x101","dl_brate":400.0,"ul_brate":200.0}]}]}}
+JSONL
+
+steady_signature_mode="$(FRESHNESS_CHECK_MODE=signature metrics_contract_collect_health_states "$steady_baseline" gnb1 | head -n 1)"
+assert_eq $'gnb1\t1\t1\t0' "$steady_signature_mode" "signature mode keeps unchanged payload stale"
+
+steady_hybrid_mode="$(FRESHNESS_CHECK_MODE=hybrid metrics_contract_collect_health_states "$steady_baseline" gnb1 | head -n 1)"
+assert_eq $'gnb1\t1\t1\t1' "$steady_hybrid_mode" "hybrid mode treats advanced steady sequence as fresh"
+
 echo "launch_lib/metrics_contract.sh tests passed"

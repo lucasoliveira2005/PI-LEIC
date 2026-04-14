@@ -8,9 +8,6 @@ SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-import matplotlib.animation as animation
-import matplotlib.pyplot as plt
-
 from metrics_api import MetricsLogReader
 
 LOG_FILE = Path(os.environ.get("METRICS_OUT", SCRIPT_DIR / "../metrics/gnb_metrics.jsonl"))
@@ -18,16 +15,15 @@ LOG_INCLUDE_ROTATED = os.environ.get("METRICS_LOG_INCLUDE_ROTATED", "1") != "0"
 LOG_MAX_ARCHIVES = int(os.environ.get("METRICS_LOG_MAX_ARCHIVES", "5"))
 SQLITE_ENABLED = os.environ.get("METRICS_SQLITE_ENABLED", "1") != "0"
 SQLITE_PATH = Path(os.environ.get("METRICS_SQLITE_PATH", "/tmp/pi-leic-metrics.sqlite"))
-READER = MetricsLogReader(
-    LOG_FILE,
-    include_rotated=LOG_INCLUDE_ROTATED,
-    max_archives=LOG_MAX_ARCHIVES,
-    sqlite_path=SQLITE_PATH if SQLITE_ENABLED else None,
-    prefer_sqlite=SQLITE_ENABLED,
-)
 
-fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
-plt.subplots_adjust(hspace=0.4)
+READER = None
+fig = None
+ax1 = None
+ax2 = None
+ani = None
+_animation = None
+_pyplot = None
+_reader_error_reported = False
 
 history_by_entity = {}
 last_sample_signature_by_entity = {}
@@ -105,10 +101,20 @@ def build_entity_sample_signature(latest_timestamp, ue_metrics):
 
 
 def animate(_):
+    global _reader_error_reported
+
+    if READER is None or ax1 is None or ax2 is None:
+        return
+
     try:
         latest_by_source = READER.latest_cells_by_source()
-    except Exception:
+    except (OSError, ValueError, TypeError, RuntimeError) as exc:
+        if not _reader_error_reported:
+            print(f"Failed to read latest metrics snapshot: {exc}", file=sys.stderr)
+            _reader_error_reported = True
         return
+
+    _reader_error_reported = False
     if not latest_by_source:
         return
 
@@ -177,18 +183,42 @@ def animate(_):
         ax2.legend(loc='upper left')
     ax2.grid(True, alpha=0.3)
 
-# Atualização a cada 1000ms
-ani = animation.FuncAnimation(fig, animate, interval=1000)
 
-print(f"Monitorizando {LOG_FILE.resolve()}...")
-if LOG_INCLUDE_ROTATED:
-    print(
-        "Leitura de métricas inclui ficheiros rotacionados "
-        f"(até {LOG_MAX_ARCHIVES} arquivos)."
+def main():
+    global READER, fig, ax1, ax2, ani, _animation, _pyplot
+
+    import matplotlib.animation as animation
+    import matplotlib.pyplot as plt
+
+    _animation = animation
+    _pyplot = plt
+    READER = MetricsLogReader(
+        LOG_FILE,
+        include_rotated=LOG_INCLUDE_ROTATED,
+        max_archives=LOG_MAX_ARCHIVES,
+        sqlite_path=SQLITE_PATH if SQLITE_ENABLED else None,
+        prefer_sqlite=SQLITE_ENABLED,
     )
-if SQLITE_ENABLED:
-    print(f"Leitura preferencial via SQLite: {SQLITE_PATH}")
-else:
-    print("Leitura por SQLite desativada; uso de JSONL direto.")
-print("Visualização multi-origem/multi-UE ativa.")
-plt.show()
+
+    fig, (ax1, ax2) = plt.subplots(2, 1, figsize=(10, 8))
+    plt.subplots_adjust(hspace=0.4)
+
+    # Keep a module reference so the animation object is not garbage-collected.
+    ani = animation.FuncAnimation(fig, animate, interval=1000)
+
+    print(f"Monitorizando {LOG_FILE.resolve()}...")
+    if LOG_INCLUDE_ROTATED:
+        print(
+            "Leitura de métricas inclui ficheiros rotacionados "
+            f"(até {LOG_MAX_ARCHIVES} arquivos)."
+        )
+    if SQLITE_ENABLED:
+        print(f"Leitura preferencial via SQLite: {SQLITE_PATH}")
+    else:
+        print("Leitura por SQLite desativada; uso de JSONL direto.")
+    print("Visualização multi-origem/multi-UE ativa.")
+    plt.show()
+
+
+if __name__ == "__main__":
+    main()

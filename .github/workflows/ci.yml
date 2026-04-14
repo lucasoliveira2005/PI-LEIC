@@ -26,6 +26,11 @@ jobs:
         run: |
           bash -n src/launch_stack.sh
           bash -n src/launch_lib/common.sh
+          bash -n src/launch_lib/root_runtime.sh
+          bash -n src/launch_lib/journal_helpers.sh
+          bash -n src/launch_lib/socket_probes.sh
+          bash -n src/launch_lib/process_management.sh
+          bash -n src/launch_lib/core_readiness.sh
           bash -n src/launch_lib/health_classification.sh
           bash -n src/launch_lib/metrics_contract.sh
           bash -n src/launch_lib/health_checks.sh

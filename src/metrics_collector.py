@@ -1,4 +1,6 @@
 #!/usr/bin/env python3
+"""Collect and persist multi-source gNB metrics to JSONL plus optional SQLite cache."""
+
 import json
 import os
 import sqlite3
@@ -190,6 +192,8 @@ def summarize_event(event):
 
 
 class SQLiteEventSink:
+    """Persist normalized metrics events and per-entity cells rows in SQLite."""
+
     def __init__(self, db_path, timeout_seconds=5.0):
         self.db_path = Path(db_path)
         self.db_path.parent.mkdir(parents=True, exist_ok=True)
@@ -334,6 +338,8 @@ class SQLiteEventSink:
 
 
 class EventWriter:
+    """Thread-safe writer that appends JSONL and best-effort SQLite mirrors."""
+
     def __init__(
         self,
         output_path,
@@ -470,6 +476,8 @@ class EventWriter:
 
 
 class MetricsSourceWorker:
+    """WebSocket worker that subscribes to one metrics source and writes events."""
+
     def __init__(self, source, writer):
         self.source = source
         self.writer = writer

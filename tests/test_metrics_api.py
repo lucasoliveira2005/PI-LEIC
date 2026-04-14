@@ -280,6 +280,48 @@ class MetricsApiTests(unittest.TestCase):
         self.assertEqual(latest["gnb1"]["timestamp"], "jsonl-now")
         self.assertEqual(latest["gnb1"]["entities"][0]["ue"]["ul_brate"], 8)
 
+    def test_source_sequences_counts_cells_events_per_source(self):
+        self._write_jsonl(
+            self.log_file,
+            [
+                self._event("gnb1", "t1", 1, 1),
+                self._event("gnb1", "t2", 2, 2),
+                self._event("gnb2", "t1", 3, 3),
+            ],
+        )
+
+        reader = MetricsLogReader(self.log_file, include_rotated=False)
+        self.assertEqual(reader.source_sequences(), {"gnb1": 2, "gnb2": 1})
+
+    def test_latest_sample_epoch_by_source_uses_collector_timestamp_fallback(self):
+        self._write_jsonl(
+            self.log_file,
+            [
+                {
+                    "source_id": "gnb1",
+                    "collector_timestamp": "2026-04-13T11:16:05+00:00",
+                    "raw_payload": {
+                        "cells": [
+                            {
+                                "ue_list": [
+                                    {
+                                        "dl_brate": 11.0,
+                                        "ul_brate": 12.0,
+                                    }
+                                ]
+                            }
+                        ]
+                    },
+                }
+            ],
+        )
+
+        reader = MetricsLogReader(self.log_file, include_rotated=False)
+        sample_epochs = reader.latest_sample_epoch_by_source()
+
+        self.assertIn("gnb1", sample_epochs)
+        self.assertIsNotNone(sample_epochs["gnb1"])
+
 
 if __name__ == "__main__":
     unittest.main()

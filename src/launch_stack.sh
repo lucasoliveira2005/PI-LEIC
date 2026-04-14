@@ -20,6 +20,9 @@ METRICS_LOG_INCLUDE_ROTATED="${METRICS_LOG_INCLUDE_ROTATED:-1}"
 METRICS_LOG_MAX_ARCHIVES="${METRICS_LOG_MAX_ARCHIVES:-5}"
 METRICS_SQLITE_ENABLED="${METRICS_SQLITE_ENABLED:-1}"
 METRICS_SQLITE_PATH="${METRICS_SQLITE_PATH:-/tmp/pi-leic-metrics.sqlite}"
+FRESHNESS_CHECK_MODE="${FRESHNESS_CHECK_MODE:-hybrid}"
+FRESHNESS_AGE_WINDOW_SECONDS="${FRESHNESS_AGE_WINDOW_SECONDS:-15}"
+FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS="${FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS:-2}"
 GNB_BIN="${GNB_BIN:-gnb}"
 UE_BIN="${UE_BIN:-srsue}"
 GNB_CONFIGS="${GNB_CONFIGS:-$SCRIPT_DIR/../config/gnb_gnb1_zmq.yaml:$SCRIPT_DIR/../config/gnb_gnb2_zmq.yaml}"
@@ -79,6 +82,16 @@ LAUNCH_LIB_DIR="$SCRIPT_DIR/launch_lib"
 
 # shellcheck source=src/launch_lib/common.sh
 source "$LAUNCH_LIB_DIR/common.sh"
+# shellcheck source=src/launch_lib/root_runtime.sh
+source "$LAUNCH_LIB_DIR/root_runtime.sh"
+# shellcheck source=src/launch_lib/journal_helpers.sh
+source "$LAUNCH_LIB_DIR/journal_helpers.sh"
+# shellcheck source=src/launch_lib/socket_probes.sh
+source "$LAUNCH_LIB_DIR/socket_probes.sh"
+# shellcheck source=src/launch_lib/process_management.sh
+source "$LAUNCH_LIB_DIR/process_management.sh"
+# shellcheck source=src/launch_lib/core_readiness.sh
+source "$LAUNCH_LIB_DIR/core_readiness.sh"
 # shellcheck source=src/launch_lib/health_classification.sh
 source "$LAUNCH_LIB_DIR/health_classification.sh"
 # shellcheck source=src/launch_lib/metrics_contract.sh
@@ -107,6 +120,8 @@ Environment overrides:
   METRICS_SOURCES_CONFIG, METRICS_OUT, GNB_BIN, UE_BIN, GNB_CONFIGS, UE_CONFIGS
   METRICS_LOG_INCLUDE_ROTATED, METRICS_LOG_MAX_ARCHIVES
   METRICS_SQLITE_ENABLED, METRICS_SQLITE_PATH
+  FRESHNESS_CHECK_MODE, FRESHNESS_AGE_WINDOW_SECONDS
+  FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS
   DASHBOARD_ENABLED, HEALTHCHECK_ENABLED, HEALTHCHECK_STRICT
   HEALTHCHECK_REQUIRE_UE_DATA_PATH, HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS
   HEALTHCHECK_UE_FAILURE_REGEX, HEALTHCHECK_AMF_FAILURE_REGEX
@@ -275,181 +290,47 @@ for item in data:
 }
 
 metrics_line_count() {
-  if [[ -f "$METRICS_OUT_PATH" ]]; then
-    wc -l < "$METRICS_OUT_PATH"
-  else
-    echo 0
-  fi
+  journal_helpers_metrics_line_count "$@"
 }
 
 root_file_line_count() {
-  local path="$1"
-  local line_count
-
-  if ! sudo -n test -f "$path" >/dev/null 2>&1; then
-    echo 0
-    return
-  fi
-
-  line_count="$(sudo -n wc -l -- "$path" 2>/dev/null | awk '{print $1}' || true)"
-  if [[ "$line_count" =~ ^[0-9]+$ ]]; then
-    echo "$line_count"
-  else
-    echo 0
-  fi
+  journal_helpers_root_file_line_count "$@"
 }
 
 root_file_contains_pattern_since_line() {
-  local path="$1"
-  local start_line="$2"
-  local regex="$3"
-
-  [[ -n "$regex" ]] || return 1
-  if ! sudo -n test -f "$path" >/dev/null 2>&1; then
-    return 1
-  fi
-
-  sudo -n tail -n "+$((start_line + 1))" "$path" 2>/dev/null \
-    | grep -E -i "$regex" >/dev/null 2>&1
+  journal_helpers_root_file_contains_pattern_since_line "$@"
 }
 
 root_file_first_match_since_line() {
-  local path="$1"
-  local start_line="$2"
-  local regex="$3"
-
-  [[ -n "$regex" ]] || return 0
-  if ! sudo -n test -f "$path" >/dev/null 2>&1; then
-    return 0
-  fi
-
-  sudo -n tail -n "+$((start_line + 1))" "$path" 2>/dev/null \
-    | grep -E -i -m 1 "$regex" || true
+  journal_helpers_root_file_first_match_since_line "$@"
 }
 
 root_unit_first_match_since_epoch() {
-  local unit="$1"
-  local since_epoch="$2"
-  local regex="$3"
-
-  [[ -n "$regex" ]] || return 0
-  sudo -n journalctl -u "$unit" --since "@$since_epoch" --no-pager -o cat 2>/dev/null \
-    | grep -E -i -m 1 "$regex" || true
+  journal_helpers_root_unit_first_match_since_epoch "$@"
 }
 
 socket_snapshot_has_process_tcp_listener() {
-  local snapshot="$1"
-  local process_name="$2"
-
-  awk -v process_name="$process_name" '
-    $1 ~ /^tcp/ && index($0, process_name) {
-      found = 1
-      exit
-    }
-    END {
-      exit(found ? 0 : 1)
-    }
-  ' <<< "$snapshot"
+  socket_probes_snapshot_has_process_tcp_listener "$@"
 }
 
 socket_snapshot_has_process_udp_port() {
-  local snapshot="$1"
-  local process_name="$2"
-  local port="$3"
-
-  awk -v process_name="$process_name" -v port="$port" '
-    $1 ~ /^udp/ && index($0, process_name) && ($5 ~ ":" port "$" || $5 ~ "\\]:" port "$") {
-      found = 1
-      exit
-    }
-    END {
-      exit(found ? 0 : 1)
-    }
-  ' <<< "$snapshot"
+  socket_probes_snapshot_has_process_udp_port "$@"
 }
 
 collect_core_socket_probe_failures() {
-  local snapshot="$1"
-  local -n failures_ref="$2"
-
-  failures_ref=()
-
-  if ! socket_snapshot_has_process_tcp_listener "$snapshot" "open5gs-amfd"; then
-    failures_ref+=("open5gs-amfd missing tcp listener")
-  fi
-  if ! socket_snapshot_has_process_tcp_listener "$snapshot" "open5gs-smfd"; then
-    failures_ref+=("open5gs-smfd missing tcp listener")
-  fi
-  if ! socket_snapshot_has_process_udp_port "$snapshot" "open5gs-smfd" "$CORE_PROBE_SMF_PFCP_PORT"; then
-    failures_ref+=("open5gs-smfd missing udp:${CORE_PROBE_SMF_PFCP_PORT}")
-  fi
-  if ! socket_snapshot_has_process_udp_port "$snapshot" "open5gs-upfd" "$CORE_PROBE_UPF_PFCP_PORT"; then
-    failures_ref+=("open5gs-upfd missing udp:${CORE_PROBE_UPF_PFCP_PORT}")
-  fi
-  if ! socket_snapshot_has_process_udp_port "$snapshot" "open5gs-upfd" "$CORE_PROBE_UPF_GTPU_PORT"; then
-    failures_ref+=("open5gs-upfd missing udp:${CORE_PROBE_UPF_GTPU_PORT}")
-  fi
-
-  [[ ${#failures_ref[@]} -gt 0 ]]
+  socket_probes_collect_core_socket_probe_failures "$@"
 }
 
 first_tcp_listener_endpoint_for_process() {
-  local snapshot="$1"
-  local process_name="$2"
-
-  awk -v process_name="$process_name" '
-    $1 ~ /^tcp/ && index($0, process_name) {
-      split($5, parts, ":")
-      port = parts[length(parts)]
-      host = substr($5, 1, length($5) - length(port) - 1)
-
-      if (host == "*" || host == "0.0.0.0") {
-        host = "127.0.0.1"
-      }
-
-      if (host ~ /\[/ || host ~ /:/) {
-        next
-      }
-
-      print host ":" port
-      exit
-    }
-  ' <<< "$snapshot"
+  socket_probes_first_tcp_listener_endpoint_for_process "$@"
 }
 
 tcp_endpoint_probe_ok() {
-  local endpoint="$1"
-  local host="${endpoint%:*}"
-  local port="${endpoint##*:}"
-
-  [[ -n "$host" && -n "$port" ]] || return 1
-
-  timeout "$CORE_READINESS_ENDPOINT_PROBE_TIMEOUT_SECONDS" \
-    bash -c ": </dev/tcp/${host}/${port}" >/dev/null 2>&1
+  socket_probes_tcp_endpoint_probe_ok "$@"
 }
 
 collect_core_endpoint_probe_failures() {
-  local snapshot="$1"
-  local -n failures_ref="$2"
-  local endpoint
-
-  failures_ref=()
-
-  endpoint="$(first_tcp_listener_endpoint_for_process "$snapshot" "open5gs-amfd")"
-  if [[ -z "$endpoint" ]]; then
-    failures_ref+=("open5gs-amfd missing active endpoint")
-  elif ! tcp_endpoint_probe_ok "$endpoint"; then
-    failures_ref+=("open5gs-amfd endpoint probe failed: ${endpoint}")
-  fi
-
-  endpoint="$(first_tcp_listener_endpoint_for_process "$snapshot" "open5gs-smfd")"
-  if [[ -z "$endpoint" ]]; then
-    failures_ref+=("open5gs-smfd missing active endpoint")
-  elif ! tcp_endpoint_probe_ok "$endpoint"; then
-    failures_ref+=("open5gs-smfd endpoint probe failed: ${endpoint}")
-  fi
-
-  [[ ${#failures_ref[@]} -gt 0 ]]
+  socket_probes_collect_core_endpoint_probe_failures "$@"
 }
 
 netns_exists() {
@@ -486,20 +367,11 @@ prepare_python_env() {
 }
 
 start_sudo_keepalive() {
-  (
-    while true; do
-      sudo -n true >/dev/null 2>&1 || exit 0
-      sleep "$SUDO_KEEPALIVE_INTERVAL_SECONDS"
-    done
-  ) &
-  SUDO_KEEPALIVE_PID="$!"
+  root_runtime_start_sudo_keepalive "$@"
 }
 
 require_sudo_session() {
-  sudo -v
-  if [[ -z "$SUDO_KEEPALIVE_PID" ]]; then
-    start_sudo_keepalive
-  fi
+  root_runtime_require_sudo_session "$@"
 }
 
 append_env_arg_if_set() {
@@ -513,166 +385,31 @@ append_env_arg_if_set() {
 }
 
 find_pids_by_comm_and_needle() {
-  local comm="$1"
-  local needle="$2"
-
-  ps -eo pid=,comm=,args= | awk -v comm="$comm" -v needle="$needle" '
-    $2 == comm && index($0, needle) {
-      print $1
-    }
-  '
+  process_management_find_pids_by_comm_and_needle "$@"
 }
 
 find_pids_by_needle() {
-  local needle="$1"
-
-  ps -eo pid=,args= | awk -v needle="$needle" '
-    index($0, needle) {
-      print $1
-    }
-  '
+  process_management_find_pids_by_needle "$@"
 }
 
 find_python_pids_by_needle() {
-  local needle="$1"
-
-  ps -eo pid=,comm=,args= | awk -v needle="$needle" '
-    $2 ~ /^python([0-9.]*)?$/ && index($0, needle) {
-      print $1
-    }
-  '
+  process_management_find_python_pids_by_needle "$@"
 }
 
 kill_matching_pids() {
-  local label="$1"
-  shift
-  local -a pids=("$@")
-
-  if [[ ${#pids[@]} -eq 0 ]]; then
-    return 0
-  fi
-
-  if [[ "$DRY_RUN" == "1" ]]; then
-    echo "Would terminate stale ${label} processes: $(join_by ', ' "${pids[@]}")"
-    return 0
-  fi
-
-  echo "Terminating stale ${label} processes: $(join_by ', ' "${pids[@]}")"
-  sudo -n kill "${pids[@]}" >/dev/null 2>&1 || true
-  sleep 1
-  sudo -n kill -9 "${pids[@]}" >/dev/null 2>&1 || true
+  process_management_kill_matching_pids "$@"
 }
 
 kill_processes_for_comm_and_needles() {
-  local label="$1"
-  local comm="$2"
-  shift 2
-  local needle
-  local pid
-  local -A pid_set=()
-  local -a pids=()
-
-  for needle in "$@"; do
-    [[ -n "$needle" ]] || continue
-    while IFS= read -r pid; do
-      [[ -n "$pid" ]] || continue
-      pid_set["$pid"]=1
-    done < <(find_pids_by_comm_and_needle "$comm" "$needle")
-  done
-
-  for pid in "${!pid_set[@]}"; do
-    pids+=("$pid")
-  done
-
-  kill_matching_pids "$label" "${pids[@]}"
+  process_management_kill_processes_for_comm_and_needles "$@"
 }
 
 kill_python_processes_for_needles() {
-  local label="$1"
-  shift
-  local needle
-  local pid
-  local -A pid_set=()
-  local -a pids=()
-
-  for needle in "$@"; do
-    [[ -n "$needle" ]] || continue
-    while IFS= read -r pid; do
-      [[ -n "$pid" ]] || continue
-      pid_set["$pid"]=1
-    done < <(find_python_pids_by_needle "$needle")
-  done
-
-  for pid in "${!pid_set[@]}"; do
-    pids+=("$pid")
-  done
-
-  kill_matching_pids "$label" "${pids[@]}"
+  process_management_kill_python_processes_for_needles "$@"
 }
 
 cleanup_stale_lab_processes() {
-  local gnb_config
-  local ue_config
-  local gnb_label
-  local ue_label
-  local gnb_config_rel=""
-  local ue_config_rel=""
-  local metrics_script_rel=""
-  local dashboard_script_rel=""
-  local gnb_comm
-  local ue_comm
-
-  gnb_comm="$(basename -- "$GNB_BIN_RESOLVED")"
-  ue_comm="$(basename -- "$UE_BIN_RESOLVED")"
-
-  if [[ "$METRICS_SCRIPT_PATH" == "$REPO_ROOT_PATH/"* ]]; then
-    metrics_script_rel="${METRICS_SCRIPT_PATH#$REPO_ROOT_PATH/}"
-  fi
-  if [[ "$DASHBOARD_SCRIPT_PATH" == "$REPO_ROOT_PATH/"* ]]; then
-    dashboard_script_rel="${DASHBOARD_SCRIPT_PATH#$REPO_ROOT_PATH/}"
-  fi
-
-  for gnb_config in "${GNB_CONFIG_PATHS[@]}"; do
-    gnb_label="$(config_label "$gnb_config")"
-    if [[ "$gnb_config" == "$REPO_ROOT_PATH/"* ]]; then
-      gnb_config_rel="${gnb_config#$REPO_ROOT_PATH/}"
-    else
-      gnb_config_rel=""
-    fi
-    kill_processes_for_comm_and_needles \
-      "gNB ${gnb_label}" \
-      "$gnb_comm" \
-      "$gnb_config" \
-      "$gnb_config_rel" \
-      "$(basename -- "$gnb_config")"
-  done
-
-  for ue_config in "${UE_CONFIG_PATHS[@]}"; do
-    ue_label="$(config_label "$ue_config")"
-    if [[ "$ue_config" == "$REPO_ROOT_PATH/"* ]]; then
-      ue_config_rel="${ue_config#$REPO_ROOT_PATH/}"
-    else
-      ue_config_rel=""
-    fi
-    kill_processes_for_comm_and_needles \
-      "UE ${ue_label}" \
-      "$ue_comm" \
-      "$ue_config" \
-      "$ue_config_rel" \
-      "$(basename -- "$ue_config")"
-  done
-
-  kill_python_processes_for_needles \
-    "metrics collector" \
-    "$METRICS_SCRIPT_PATH" \
-    "$metrics_script_rel"
-
-  if [[ "$DASHBOARD_ENABLED" == "1" ]]; then
-    kill_python_processes_for_needles \
-      "dashboard" \
-      "$DASHBOARD_SCRIPT_PATH" \
-      "$dashboard_script_rel"
-  fi
+  process_management_cleanup_stale_lab_processes "$@"
 }
 
 open_terminal() {
@@ -706,175 +443,19 @@ open_terminal() {
 }
 
 wait_for_core_readiness() {
-  local amf_start_line="$1"
-  local smf_start_line="$2"
-  local upf_start_line="$3"
-  local deadline=$((SECONDS + CORE_READINESS_TIMEOUT_SECONDS))
-  local marker_checks_enabled="$CORE_READINESS_REQUIRE_LOG_MARKERS"
-  local smf_amf_assoc_checks_enabled="$CORE_READINESS_REQUIRE_SMF_AMF_ASSOCIATION"
-  local socket_probe_checks_enabled="$CORE_READINESS_REQUIRE_SOCKET_PROBES"
-  local endpoint_probe_checks_enabled="$CORE_READINESS_REQUIRE_ACTIVE_ENDPOINT_PROBES"
-  local stable_polls=0
-  local -a inactive_units=()
-  local -a missing_markers=()
-  local -a missing_socket_probes=()
-  local -a missing_endpoint_probes=()
-  local unit
-  local core_failure_line
-  local socket_snapshot
-
-  if [[ "$DRY_RUN" == "1" ]]; then
-    echo "Would wait up to ${CORE_READINESS_TIMEOUT_SECONDS}s for dynamic Open5GS core readiness checks."
-    return 0
-  fi
-
-  echo "Waiting up to ${CORE_READINESS_TIMEOUT_SECONDS}s for dynamic Open5GS core readiness..."
-
-  if [[ "$marker_checks_enabled" == "1" ]]; then
-    if ! sudo -n test -f "$CORE_AMF_LOG_PATH" >/dev/null 2>&1; then
-      marker_checks_enabled=0
-      echo "Core log marker checks disabled: missing $CORE_AMF_LOG_PATH"
-    elif ! sudo -n test -f "$CORE_SMF_LOG_PATH" >/dev/null 2>&1; then
-      marker_checks_enabled=0
-      echo "Core log marker checks disabled: missing $CORE_SMF_LOG_PATH"
-    elif ! sudo -n test -f "$CORE_UPF_LOG_PATH" >/dev/null 2>&1; then
-      marker_checks_enabled=0
-      echo "Core log marker checks disabled: missing $CORE_UPF_LOG_PATH"
-    fi
-  fi
-
-  if [[ "$marker_checks_enabled" != "1" ]]; then
-    smf_amf_assoc_checks_enabled=0
-  fi
-
-  if [[ "$socket_probe_checks_enabled" == "1" ]]; then
-    if ! sudo -n ss -H -lntup -4 >/dev/null 2>&1; then
-      socket_probe_checks_enabled=0
-      echo "Core socket probes disabled: unable to inspect listening sockets with ss."
-    fi
-  fi
-
-  if [[ "$endpoint_probe_checks_enabled" == "1" ]]; then
-    if [[ "$socket_probe_checks_enabled" != "1" ]]; then
-      endpoint_probe_checks_enabled=0
-      echo "Active endpoint probes disabled: socket probes are unavailable."
-    elif ! command -v timeout >/dev/null 2>&1; then
-      endpoint_probe_checks_enabled=0
-      echo "Active endpoint probes disabled: 'timeout' command is unavailable."
-    fi
-  fi
-
-  while (( SECONDS < deadline )); do
-    inactive_units=()
-    missing_markers=()
-    missing_socket_probes=()
-    missing_endpoint_probes=()
-
-    for unit in "${CORE_UNITS[@]}"; do
-      if ! sudo -n systemctl is-active --quiet "$unit" >/dev/null 2>&1; then
-        inactive_units+=("$unit")
-      fi
-    done
-
-    if [[ "$marker_checks_enabled" == "1" ]]; then
-      if ! root_file_contains_pattern_since_line "$CORE_AMF_LOG_PATH" "$amf_start_line" 'ngap_server|sbi_server'; then
-        missing_markers+=("amf")
-      fi
-      if ! root_file_contains_pattern_since_line "$CORE_SMF_LOG_PATH" "$smf_start_line" 'pfcp_server|gtp_connect|sbi_server'; then
-        missing_markers+=("smf")
-      fi
-      if [[ "$smf_amf_assoc_checks_enabled" == "1" ]] && ! root_file_contains_pattern_since_line "$CORE_SMF_LOG_PATH" "$smf_start_line" '\[AMF\] NFInstance associated|\[namf-comm\] NFService associated'; then
-        missing_markers+=("smf-amf-association")
-      fi
-      if ! root_file_contains_pattern_since_line "$CORE_UPF_LOG_PATH" "$upf_start_line" 'pfcp_server|gtpu_server'; then
-        missing_markers+=("upf")
-      fi
-    fi
-
-    if [[ "$socket_probe_checks_enabled" == "1" ]]; then
-      socket_snapshot="$(sudo -n ss -H -lntup -4 2>/dev/null || true)"
-      collect_core_socket_probe_failures "$socket_snapshot" missing_socket_probes || true
-
-      if [[ "$endpoint_probe_checks_enabled" == "1" ]]; then
-        collect_core_endpoint_probe_failures "$socket_snapshot" missing_endpoint_probes || true
-      fi
-    fi
-
-    core_failure_line="$(root_file_first_match_since_line "$CORE_AMF_LOG_PATH" "$amf_start_line" "$HEALTHCHECK_AMF_FAILURE_REGEX")"
-    if [[ -n "$core_failure_line" ]]; then
-      echo "Detected control-plane failure signal while waiting for core readiness:"
-      echo "  amf.log: ${core_failure_line}"
-      return 1
-    fi
-
-    core_failure_line="$(root_file_first_match_since_line "$CORE_SMF_LOG_PATH" "$smf_start_line" "$HEALTHCHECK_AMF_FAILURE_REGEX")"
-    if [[ -n "$core_failure_line" ]]; then
-      echo "Detected control-plane failure signal while waiting for core readiness:"
-      echo "  smf.log: ${core_failure_line}"
-      return 1
-    fi
-
-    if [[ ${#inactive_units[@]} -eq 0 && ${#missing_markers[@]} -eq 0 && ${#missing_socket_probes[@]} -eq 0 && ${#missing_endpoint_probes[@]} -eq 0 ]]; then
-      stable_polls=$((stable_polls + 1))
-    else
-      stable_polls=0
-    fi
-
-    if (( stable_polls >= CORE_READINESS_STABLE_POLLS )); then
-      echo "Core readiness checks passed."
-      if [[ "$socket_probe_checks_enabled" == "1" ]]; then
-        echo "Core socket probes passed for AMF/SMF/UPF listeners."
-      fi
-      if [[ "$endpoint_probe_checks_enabled" == "1" ]]; then
-        echo "Active endpoint probes passed for AMF/SMF TCP listeners."
-      fi
-      return 0
-    fi
-
-    sleep "$CORE_READINESS_POLL_SECONDS"
-  done
-
-  echo "Timed out waiting for dynamic Open5GS core readiness."
-  if [[ ${#inactive_units[@]} -gt 0 ]]; then
-    echo "Inactive core units: $(join_by ', ' "${inactive_units[@]}")"
-  fi
-  if [[ "$marker_checks_enabled" == "1" && ${#missing_markers[@]} -gt 0 ]]; then
-    echo "Missing startup markers in core logs: $(join_by ', ' "${missing_markers[@]}")"
-  fi
-  if [[ "$socket_probe_checks_enabled" == "1" && ${#missing_socket_probes[@]} -gt 0 ]]; then
-    echo "Missing core socket probes: $(join_by ', ' "${missing_socket_probes[@]}")"
-  fi
-  if [[ "$endpoint_probe_checks_enabled" == "1" && ${#missing_endpoint_probes[@]} -gt 0 ]]; then
-    echo "Failed active endpoint probes: $(join_by ', ' "${missing_endpoint_probes[@]}")"
-  fi
-  return 1
+  core_readiness_wait_for_core_readiness "$@"
 }
 
 stop_user_unit_if_exists() {
-  local unit="$1"
-  systemctl --user stop "$unit" >/dev/null 2>&1 || true
-  systemctl --user reset-failed "$unit" >/dev/null 2>&1 || true
+  root_runtime_stop_user_unit_if_exists "$@"
 }
 
 collect_known_user_units() {
-  local -n source_ref="$1"
-  local -n target_ref="$2"
-  local unit
-  local load_state
-
-  target_ref=()
-  for unit in "${source_ref[@]}"; do
-    load_state="$(systemctl --user show "$unit" --property=LoadState --value 2>/dev/null || true)"
-    if [[ -n "$load_state" && "$load_state" != "not-found" ]]; then
-      target_ref+=("$unit")
-    fi
-  done
+  root_runtime_collect_known_user_units "$@"
 }
 
 stop_root_unit_if_exists() {
-  local unit="$1"
-  sudo -n systemctl stop "$unit" >/dev/null 2>&1 || true
-  sudo -n systemctl reset-failed "$unit" >/dev/null 2>&1 || true
+  root_runtime_stop_root_unit_if_exists "$@"
 }
 
 stop_supervised_stack() {
@@ -907,47 +488,11 @@ stop_supervised_stack() {
 }
 
 start_root_unit() {
-  local unit="$1"
-  local description="$2"
-  shift 2
-
-  if [[ "$DRY_RUN" == "1" ]]; then
-    printf '[root unit %s]\nsudo -n systemd-run --unit=%q %q\n\n' "$unit" "$unit" "$(join_by ' ' "$@")"
-    return
-  fi
-
-  sudo -n systemd-run \
-    --quiet \
-    --collect \
-    --no-ask-password \
-    --unit="$unit" \
-    --description="$description" \
-    --working-directory="$WORKDIR" \
-    --property=Restart=on-failure \
-    --property=RestartSec=2 \
-    "$@" >/dev/null
+  root_runtime_start_root_unit "$@"
 }
 
 start_user_unit() {
-  local unit="$1"
-  local description="$2"
-  shift 2
-
-  if [[ "$DRY_RUN" == "1" ]]; then
-    printf '[user unit %s]\nsystemd-run --user --unit=%q %q\n\n' "$unit" "$unit" "$(join_by ' ' "$@")"
-    return
-  fi
-
-  systemd-run \
-    --user \
-    --quiet \
-    --collect \
-    --unit="$unit" \
-    --description="$description" \
-    --working-directory="$WORKDIR" \
-    --property=Restart=on-failure \
-    --property=RestartSec=2 \
-    "$@" >/dev/null
+  root_runtime_start_user_unit "$@"
 }
 
 start_supervised_stack() {

@@ -22,6 +22,15 @@ append_bad_metrics() {
 JSONL
 }
 
+append_steady_metrics() {
+  local path="$1"
+
+  cat >> "$path" <<'JSONL'
+{"source_id":"gnb1","raw_payload":{"cells":[{"ue_list":[{"rnti":"0x501","dl_brate":900.0,"ul_brate":450.0}]}]}}
+{"source_id":"gnb2","raw_payload":{"cells":[{"ue_list":[{"rnti":"0x601","dl_brate":950.0,"ul_brate":470.0}]}]}}
+JSONL
+}
+
 create_stub_commands() {
   local stub_dir="$1"
 
@@ -101,6 +110,38 @@ run_failure_case() {
   fi
 }
 
+run_hybrid_sequence_case() {
+  local sources_file="$1"
+  local stub_dir="$2"
+  local metrics_file="$3"
+  local output_file="$4"
+  local error_file="$5"
+
+  : > "$metrics_file"
+  append_steady_metrics "$metrics_file"
+
+  (
+    sleep 1
+    append_steady_metrics "$metrics_file"
+  ) &
+  local writer_pid=$!
+
+  if ! env \
+    PATH="$stub_dir:$PATH" \
+    METRICS_OUT="$metrics_file" \
+    METRICS_SOURCES_CONFIG="$sources_file" \
+    FRESHNESS_CHECK_MODE=hybrid \
+    PING_WAIT_SECONDS=2 \
+    bash "$REPO_ROOT/src/validate_stage.sh" --skip-provision --skip-launch --skip-ping > "$output_file" 2> "$error_file"; then
+    wait "$writer_pid" || true
+    echo "Expected validate_stage hybrid sequence case to pass" >&2
+    cat "$error_file" >&2 || true
+    exit 1
+  fi
+
+  wait "$writer_pid"
+}
+
 tmp_dir="$(mktemp -d)"
 trap 'rm -rf "$tmp_dir"' EXIT
 
@@ -135,5 +176,12 @@ run_failure_case \
   "$tmp_dir/metrics_failure.jsonl" \
   "$tmp_dir/failure.out" \
   "$tmp_dir/failure.err"
+
+run_hybrid_sequence_case \
+  "$sources_file" \
+  "$stub_dir" \
+  "$tmp_dir/metrics_hybrid.jsonl" \
+  "$tmp_dir/hybrid.out" \
+  "$tmp_dir/hybrid.err"
 
 echo "validate_stage rootless shell tests passed"

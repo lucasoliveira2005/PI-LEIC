@@ -119,6 +119,15 @@ your systemd user services.
 - waits for each UE namespace to gain tunnel IPv4 and a default route
 - verifies that the required supervised units are actually active before reporting ready
 - fails fast when explicit attach/PDU failure signals are detected in UE/core logs
+- evaluates metrics freshness with configurable `signature`, `sequence`, `age`, or `hybrid` modes (default `hybrid`) to reduce low-traffic false stale failures
+
+The launcher entrypoint now delegates cohesive runtime helpers to:
+
+- `src/launch_lib/root_runtime.sh`
+- `src/launch_lib/journal_helpers.sh`
+- `src/launch_lib/socket_probes.sh`
+- `src/launch_lib/process_management.sh`
+- `src/launch_lib/core_readiness.sh`
 
 When the dashboard is disabled or there is no display, `--status` only reports user
 units that are actually loaded.
@@ -166,6 +175,12 @@ It will:
 - send traffic from `ue1` and `ue2` to `10.45.0.1`
 - confirm fresh metrics for every configured source via the shared reader contract (`src/metrics_api.py`, SQLite-first with JSONL fallback)
 - confirm fresh non-zero `dl_brate` and `ul_brate` for all observed UE entities in every configured source
+
+Freshness policy controls are available for both launcher readiness and validator checks:
+
+- `FRESHNESS_CHECK_MODE` (default `hybrid`, accepts `signature`, `sequence`, `age`, `hybrid`)
+- `FRESHNESS_AGE_WINDOW_SECONDS` (default `15`)
+- `FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS` (default `2`)
 
 This is the authoritative end-to-end validation flow. By default it launches the stack in supervised mode, enables dynamic core readiness checks before UE attach (including live socket and active endpoint probes), enables strict launch readiness checks for service and metrics health, fails fast on explicit attach/PDU failure signals with categorized cause summaries, disables the dashboard, defers UE data-path checks to this script, waits for each UE namespace to gain a usable route, and validates after real traffic has been generated. If a stale manual run is still holding ZMQ or NG-U ports, the launcher now cleans up the old PI-LEIC lab processes before starting the supervised units.
 
