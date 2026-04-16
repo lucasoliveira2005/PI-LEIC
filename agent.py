@@ -775,53 +775,6 @@ Pergunta:
     return first_reply
 
 
-def build_network_prompt(state: dict, source: str) -> str:
-    congestion, handover = analyze_state(state)
-
-    sinr_detail = ""
-    if "avg_sinr_db" in state:
-        sinr_detail = f" ({state['avg_sinr_db']} dB médio)"
-
-    return f"""
-Estado da rede ({source}):
-UEs: {state['ues']}
-PRB usage: {state['prb_usage']}%
-SINR: {state['sinr']}{sinr_detail}
-
-Decisão lógica base:
-- Congestionamento: {congestion}
-- Handover necessário: {handover}
-
-Explica tecnicamente esta situação, confirma se a decisão parece correta,
-e sugere melhorias práticas em 3-5 pontos curtos.
-"""
-
-
-def build_network_prompt_from_user() -> Optional[str]:
-    print("\nInsere os valores para análise da rede:")
-    try:
-        ues = int(input("UEs: ").strip())
-        prb_usage = float(input("PRB usage (%): ").strip())
-    except ValueError:
-        print("Entrada inválida para UEs/PRB. Usa números.")
-        return None
-    except (EOFError, KeyboardInterrupt):
-        print("\nEntrada interrompida.")
-        return None
-
-    sinr = input("SINR (low/medium/high): ").strip().lower()
-    if sinr not in {"low", "medium", "high"}:
-        print("SINR inválido. Usa: low, medium ou high.")
-        return None
-
-    state = {
-        "ues": ues,
-        "prb_usage": prb_usage,
-        "sinr": sinr,
-    }
-    return build_network_prompt(state, source="input manual")
-
-
 def print_help():
     print("\nComandos disponíveis:")
     print("/ajuda  -> mostra esta ajuda")
