@@ -78,6 +78,7 @@ run_success_case() {
     PATH="$stub_dir:$PATH" \
     METRICS_OUT="$metrics_file" \
     METRICS_SOURCES_CONFIG="$sources_file" \
+    METRICS_SQLITE_ENABLED=0 \
     TRAFFIC_SETTLE_SECONDS=2 \
     bash "$REPO_ROOT/src/validate_stage.sh" --skip-provision --skip-launch --skip-traffic > "$output_file" 2> "$error_file"; then
     wait "$writer_pid" || true
@@ -107,6 +108,7 @@ run_failure_case() {
     PATH="$stub_dir:$PATH" \
     METRICS_OUT="$metrics_file" \
     METRICS_SOURCES_CONFIG="$sources_file" \
+    METRICS_SQLITE_ENABLED=0 \
     TRAFFIC_SETTLE_SECONDS=2 \
     bash "$REPO_ROOT/src/validate_stage.sh" --skip-provision --skip-launch --skip-traffic > "$output_file" 2> "$error_file"; then
     wait "$writer_pid" || true
@@ -143,6 +145,7 @@ run_hybrid_sequence_case() {
     PATH="$stub_dir:$PATH" \
     METRICS_OUT="$metrics_file" \
     METRICS_SOURCES_CONFIG="$sources_file" \
+    METRICS_SQLITE_ENABLED=0 \
     FRESHNESS_CHECK_MODE=hybrid \
     TRAFFIC_SETTLE_SECONDS=2 \
     bash "$REPO_ROOT/src/validate_stage.sh" --skip-provision --skip-launch --skip-traffic > "$output_file" 2> "$error_file"; then

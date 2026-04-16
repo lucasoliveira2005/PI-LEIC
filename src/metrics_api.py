@@ -201,9 +201,10 @@ class MetricsLogReader:
             JOIN metrics_cell_entities AS ce
               ON ce.event_id = e.id
             WHERE e.metric_family = 'cells'
-              AND (? IS NULL OR e.collector_timestamp >= ?)
-              AND (? IS NULL OR e.collector_timestamp <= ?)
-            ORDER BY e.collector_timestamp ASC, e.id ASC, ce.cell_index ASC, ce.ue_index ASC
+              AND (? IS NULL OR COALESCE(e.event_timestamp, e.collector_timestamp) >= ?)
+              AND (? IS NULL OR COALESCE(e.event_timestamp, e.collector_timestamp) <= ?)
+            ORDER BY COALESCE(e.event_timestamp, e.collector_timestamp) ASC,
+                     e.id ASC, ce.cell_index ASC, ce.ue_index ASC
         """
 
         try:

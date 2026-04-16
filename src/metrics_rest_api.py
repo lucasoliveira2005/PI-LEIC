@@ -51,7 +51,13 @@ LOG_MAX_ARCHIVES = parse_non_negative_int_env("METRICS_LOG_MAX_ARCHIVES", 5)
 SQLITE_ENABLED = parse_bool_env("METRICS_SQLITE_ENABLED", True)
 SQLITE_PATH = Path(os.environ.get("METRICS_SQLITE_PATH", "/tmp/pi-leic-metrics.sqlite"))
 
-ALERT_STALE_AFTER_SECONDS = parse_non_negative_float_env("ALERT_STALE_AFTER_SECONDS", 30.0)
+# Cap stale-source timeout: same defensive pattern as snapshot TTL.
+# A misconfigured 86400 would suppress stale-source alerts for 24 h.
+_STALE_TIMEOUT_MAX_SECONDS = 300.0
+ALERT_STALE_AFTER_SECONDS = min(
+    parse_non_negative_float_env("ALERT_STALE_AFTER_SECONDS", 30.0),
+    _STALE_TIMEOUT_MAX_SECONDS,
+)
 # -1.0 = disabled sentinel; use parse_float_env to allow negative values.
 ALERT_MIN_DL_BRATE = parse_float_env("ALERT_MIN_DL_BRATE", -1.0)
 ALERT_MIN_UL_BRATE = parse_float_env("ALERT_MIN_UL_BRATE", -1.0)
@@ -695,7 +701,12 @@ def get_health() -> Dict[str, Any]:
     reader_warning: Optional[str] = None
 
     try:
-        snapshot, sample_epochs = _cached_snapshot()
+        # Always read fresh data for /health — a cached snapshot can be up to
+        # METRICS_SNAPSHOT_TTL_SECONDS (≤60 s) old, masking sources that just
+        # went silent.  The TTL cache is still used by /metrics and /alerts.
+        _health_reader = _reader()
+        snapshot = _health_reader.latest_cells_by_source()
+        sample_epochs = _health_reader.latest_sample_epoch_by_source()
         snapshot_summary = _snapshot_summary(snapshot)
 
         for sid, source_entry in snapshot.items():
@@ -726,6 +737,11 @@ def get_health() -> Dict[str, Any]:
 
     if reader_warning:
         response["warning"] = reader_warning
+
+    # Warn operators when both throughput thresholds are disabled so they
+    # don't mistake "0 low-throughput alerts" for proof the system is healthy.
+    if ALERT_MIN_DL_BRATE < 0 and ALERT_MIN_UL_BRATE < 0:
+        response["throughput_alerting_disabled"] = True
 
     return response
 

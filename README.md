@@ -117,7 +117,7 @@ your systemd user services.
 - optionally launches the dashboard
 - waits dynamically for Open5GS core readiness (active units, startup log markers, live socket probes, and active endpoint probes) before starting attach-sensitive components
 - runs readiness checks after the supervised stack has actually started
-- waits for each UE namespace to gain tunnel IPv4 and a default route
+- defers UE data-path route checks by default (set `HEALTHCHECK_REQUIRE_UE_DATA_PATH=1` to require tunnel IPv4/default-route readiness during launch)
 - verifies that the required supervised units are actually active before reporting ready
 - fails fast when explicit attach/PDU failure signals are detected in UE/core logs
 - evaluates metrics freshness with configurable `signature`, `sequence`, `age`, or `hybrid` modes (default `hybrid`) to reduce low-traffic false stale failures

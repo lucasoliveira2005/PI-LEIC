@@ -32,6 +32,37 @@ collect_attach_failure_signals_since() {
   [[ ${#failures_ref[@]} -gt 0 ]]
 }
 
+should_fail_fast_on_attach_failures() {
+  local -n failures_ref="$1"
+  local excluded_categories_raw="${HEALTHCHECK_FAIL_FAST_EXCLUDE_CATEGORIES:-core-discovery}"
+  local entry
+  local category
+  local -A excluded_categories=()
+
+  excluded_categories_raw="${excluded_categories_raw//,/ }"
+  for category in $excluded_categories_raw; do
+    category="$(printf '%s' "$category" | tr '[:upper:]' '[:lower:]')"
+    [[ -n "$category" ]] || continue
+    excluded_categories["$category"]=1
+  done
+
+  for entry in "${failures_ref[@]}"; do
+    category="${entry#[}"
+    if [[ "$category" == "$entry" ]]; then
+      category="unknown"
+    else
+      category="${category%%]*}"
+    fi
+    category="$(printf '%s' "$category" | tr '[:upper:]' '[:lower:]')"
+
+    if [[ "${excluded_categories[$category]:-0}" != "1" ]]; then
+      return 0
+    fi
+  done
+
+  return 1
+}
+
 run_health_checks() {
   local _start_line="$1"
   local deadline=$((SECONDS + HEALTHCHECK_TIMEOUT_SECONDS))
@@ -154,8 +185,10 @@ run_health_checks() {
       fi
 
       if [[ "$HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS" == "1" ]]; then
-        echo "Failing launch readiness early due to explicit attach/PDU failure signals."
-        return 1
+        if should_fail_fast_on_attach_failures attach_failure_signals; then
+          echo "Failing launch readiness early due to explicit attach/PDU failure signals."
+          return 1
+        fi
       fi
     fi
 

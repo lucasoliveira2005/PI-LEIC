@@ -28,6 +28,7 @@ LAUNCH_HEALTHCHECK_ENABLED="${LAUNCH_HEALTHCHECK_ENABLED:-1}"
 LAUNCH_HEALTHCHECK_STRICT="${LAUNCH_HEALTHCHECK_STRICT:-1}"
 LAUNCH_HEALTHCHECK_REQUIRE_UE_DATA_PATH="${LAUNCH_HEALTHCHECK_REQUIRE_UE_DATA_PATH:-0}"
 LAUNCH_HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS="${LAUNCH_HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS:-1}"
+LAUNCH_HEALTHCHECK_FAIL_FAST_EXCLUDE_CATEGORIES="${LAUNCH_HEALTHCHECK_FAIL_FAST_EXCLUDE_CATEGORIES:-core-discovery}"
 LAUNCH_CORE_READINESS_TIMEOUT_SECONDS="${LAUNCH_CORE_READINESS_TIMEOUT_SECONDS:-45}"
 LAUNCH_CORE_READINESS_POLL_SECONDS="${LAUNCH_CORE_READINESS_POLL_SECONDS:-1}"
 LAUNCH_CORE_READINESS_STABLE_POLLS="${LAUNCH_CORE_READINESS_STABLE_POLLS:-3}"
@@ -75,6 +76,7 @@ Environment overrides:
   LAUNCH_HEALTHCHECK_ENABLED, LAUNCH_HEALTHCHECK_STRICT
   LAUNCH_HEALTHCHECK_REQUIRE_UE_DATA_PATH
   LAUNCH_HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS
+  LAUNCH_HEALTHCHECK_FAIL_FAST_EXCLUDE_CATEGORIES
   LAUNCH_CORE_READINESS_TIMEOUT_SECONDS
   LAUNCH_CORE_READINESS_POLL_SECONDS
   LAUNCH_CORE_READINESS_STABLE_POLLS
@@ -295,6 +297,54 @@ reader = MetricsLogReader(
 latest_by_source = reader.latest_cells_by_source()
 source_sequences = reader.source_sequences()
 source_sample_epochs = reader.latest_sample_epoch_by_source()
+window_events = reader.window_cells_events(lower_epoch=baseline_captured_at_epoch)
+if not window_events:
+  # Some test fixtures omit timestamps; fall back to unbounded scan in that case.
+  window_events = reader.window_cells_events()
+
+window_events_by_source = {}
+for event in window_events:
+  source_id = str(event.get("source_id", "single"))
+  entities = event.get("entities") or []
+  if not entities:
+    continue
+  window_events_by_source.setdefault(source_id, []).append(event)
+
+
+def coerce_int(value):
+  try:
+    return int(value)
+  except (TypeError, ValueError):
+    return None
+
+
+def iter_recent_entities(source_id, source_entry):
+  source_events = window_events_by_source.get(source_id) or []
+  if source_events:
+    baseline_sequence = coerce_int(baseline_sequences.get(source_id))
+    current_sequence = coerce_int(source_sequences.get(source_id))
+    if current_sequence is None:
+      current_sequence = coerce_int(source_entry.get("sequence"))
+
+    if baseline_sequence is not None and current_sequence is not None and current_sequence > baseline_sequence:
+      event_count = current_sequence - baseline_sequence
+      for event in source_events[-event_count:]:
+        for entity in event.get("entities") or []:
+          yield entity
+      return
+
+    if baseline_sequence is None:
+      for event in source_events[-50:]:
+        for entity in event.get("entities") or []:
+          yield entity
+      return
+
+    for entity in source_events[-1].get("entities") or []:
+      yield entity
+    return
+
+  for entity in source_entry.get("entities") or []:
+    yield entity
 
 seen_sources = set()
 positive = {
@@ -324,8 +374,7 @@ for source_id in required_sources:
   if not is_fresh:
     stale_sources.append(source_id)
 
-  entities = source_entry.get("entities") or []
-  for entity in entities:
+  for entity in iter_recent_entities(source_id, source_entry):
     if not isinstance(entity, dict):
       continue
 
@@ -505,6 +554,7 @@ if [[ "$SKIP_LAUNCH" != "1" ]]; then
     FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS="$FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS" \
     HEALTHCHECK_REQUIRE_UE_DATA_PATH="$LAUNCH_HEALTHCHECK_REQUIRE_UE_DATA_PATH" \
     HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS="$LAUNCH_HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS" \
+    HEALTHCHECK_FAIL_FAST_EXCLUDE_CATEGORIES="$LAUNCH_HEALTHCHECK_FAIL_FAST_EXCLUDE_CATEGORIES" \
     CORE_READINESS_TIMEOUT_SECONDS="$LAUNCH_CORE_READINESS_TIMEOUT_SECONDS" \
     CORE_READINESS_POLL_SECONDS="$LAUNCH_CORE_READINESS_POLL_SECONDS" \
     CORE_READINESS_STABLE_POLLS="$LAUNCH_CORE_READINESS_STABLE_POLLS" \
