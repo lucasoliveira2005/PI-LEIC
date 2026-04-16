@@ -3,7 +3,10 @@
 root_runtime_start_sudo_keepalive() {
   (
     while true; do
-      sudo -n true >/dev/null 2>&1 || exit 0
+      if ! sudo -n true >/dev/null 2>&1; then
+        echo "Warning: sudo keepalive stopped; privileged commands may require re-authentication." >&2
+        exit 1
+      fi
       sleep "$SUDO_KEEPALIVE_INTERVAL_SECONDS"
     done
   ) &
@@ -11,10 +14,15 @@ root_runtime_start_sudo_keepalive() {
 }
 
 root_runtime_require_sudo_session() {
-  sudo -v
-  if [[ -z "$SUDO_KEEPALIVE_PID" ]]; then
-    root_runtime_start_sudo_keepalive
+  if ! sudo -n true >/dev/null 2>&1; then
+    sudo -v
   fi
+
+  if [[ -n "$SUDO_KEEPALIVE_PID" ]] && kill -0 "$SUDO_KEEPALIVE_PID" >/dev/null 2>&1; then
+    return 0
+  fi
+
+  root_runtime_start_sudo_keepalive
 }
 
 root_runtime_stop_user_unit_if_exists() {

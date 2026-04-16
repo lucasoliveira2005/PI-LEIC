@@ -41,7 +41,7 @@ source src/.venv/bin/activate
 ## 5) Executar o agente
 
 ```bash
-python3 agent.py
+python3 agent/agent.py
 ```
 
 ## 6) Comandos dentro do agente

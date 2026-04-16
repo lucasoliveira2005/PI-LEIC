@@ -37,6 +37,11 @@ jobs:
           bash -n src/validate_stage.sh
           bash -n tests/test_launch_lib_common.sh
           bash -n tests/test_launch_lib_health_classification.sh
+          bash -n tests/test_launch_lib_journal_helpers.sh
+          bash -n tests/test_launch_lib_socket_probes.sh
+          bash -n tests/test_launch_lib_process_management.sh
+          bash -n tests/test_launch_lib_root_runtime.sh
+          bash -n tests/test_launch_lib_core_readiness.sh
           bash -n tests/test_launch_lib_metrics_contract.sh
           bash -n tests/test_launch_stack_dry_run_rootless.sh
           bash -n tests/test_validate_stage_rootless.sh
@@ -45,17 +50,40 @@ jobs:
         run: |
           bash tests/test_launch_lib_common.sh
           bash tests/test_launch_lib_health_classification.sh
+          bash tests/test_launch_lib_journal_helpers.sh
+          bash tests/test_launch_lib_socket_probes.sh
+          bash tests/test_launch_lib_process_management.sh
+          bash tests/test_launch_lib_root_runtime.sh
+          bash tests/test_launch_lib_core_readiness.sh
           bash tests/test_launch_lib_metrics_contract.sh
           bash tests/test_launch_stack_dry_run_rootless.sh
           bash tests/test_validate_stage_rootless.sh
 
       - name: Python syntax checks
         run: |
+          python -m py_compile src/env_utils.py
+          python -m py_compile src/shared/env_utils.py
+          python -m py_compile src/shared/identity.py
+          python -m py_compile src/shared/liveness.py
           python -m py_compile src/metrics_api.py
+          python -m py_compile src/metrics_liveness.py
+          python -m py_compile src/metrics_rest_api.py
+          python -m py_compile src/api_models.py
           python -m py_compile src/metrics_identity.py
           python -m py_compile src/metrics_collector.py
+          python -m py_compile src/collector/config.py
+          python -m py_compile src/collector/enrichment.py
+          python -m py_compile src/collector/transport.py
+          python -m py_compile src/collector/storage.py
+          python -m py_compile src/collector/worker.py
           python -m py_compile src/dashboard.py
           python -m py_compile src/provision_subscribers.py
+          python -m py_compile agent/agent.py
+
+      - name: Lint with ruff
+        run: |
+          pip install ruff
+          ruff check src/ tests/ agent/ --select E,F --ignore E501
 
       - name: Unit tests
         run: |

@@ -1,3 +1,8 @@
+# DEPRECATED: Single-gNB reference configuration.
+# Superseded by gnb_gnb1_zmq.yaml and gnb_gnb2_zmq.yaml for the multi-gNB testbed.
+# Not referenced by any runtime code (metrics_sources.json and launch_stack.sh use the
+# per-gNB configs). Kept here as a reference baseline only.
+
 # srsRAN Project gNB config for ZMQ + srsUE (FDD band 3, 15 kHz SCS)
 # srsUE only supports 15 kHz SCS → FDD bands only
 

@@ -1,7 +1,5 @@
 import importlib.util
-import os
 import sys
-import tempfile
 import types
 import unittest
 from pathlib import Path

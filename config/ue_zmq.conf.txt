@@ -1,3 +1,7 @@
+# DEPRECATED: Single-UE reference configuration.
+# Superseded by ue1_zmq.conf.txt and ue2_zmq.conf.txt for the multi-gNB testbed.
+# Not referenced by any runtime code. Kept here as a reference baseline only.
+
 [rf]
 freq_offset = 0
 tx_gain = 50

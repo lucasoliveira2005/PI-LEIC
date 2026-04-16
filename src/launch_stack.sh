@@ -14,12 +14,14 @@ VENV_DIR="${VENV_DIR:-}"
 REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-$SCRIPT_DIR/../requirements.txt}"
 METRICS_SCRIPT="${METRICS_SCRIPT:-metrics_collector.py}"
 DASHBOARD_SCRIPT="${DASHBOARD_SCRIPT:-dashboard.py}"
+API_SCRIPT="${API_SCRIPT:-metrics_rest_api.py}"
 METRICS_SOURCES_CONFIG="${METRICS_SOURCES_CONFIG:-$SCRIPT_DIR/../config/metrics_sources.json}"
 METRICS_OUT="${METRICS_OUT:-$SCRIPT_DIR/../metrics/gnb_metrics.jsonl}"
 METRICS_LOG_INCLUDE_ROTATED="${METRICS_LOG_INCLUDE_ROTATED:-1}"
 METRICS_LOG_MAX_ARCHIVES="${METRICS_LOG_MAX_ARCHIVES:-5}"
 METRICS_SQLITE_ENABLED="${METRICS_SQLITE_ENABLED:-1}"
 METRICS_SQLITE_PATH="${METRICS_SQLITE_PATH:-/tmp/pi-leic-metrics.sqlite}"
+METRICS_TRANSPORT_BACKEND="${METRICS_TRANSPORT_BACKEND:-websocket}"
 FRESHNESS_CHECK_MODE="${FRESHNESS_CHECK_MODE:-hybrid}"
 FRESHNESS_AGE_WINDOW_SECONDS="${FRESHNESS_AGE_WINDOW_SECONDS:-15}"
 FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS="${FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS:-2}"
@@ -29,6 +31,9 @@ GNB_CONFIGS="${GNB_CONFIGS:-$SCRIPT_DIR/../config/gnb_gnb1_zmq.yaml:$SCRIPT_DIR/
 UE_CONFIGS="${UE_CONFIGS:-$SCRIPT_DIR/../config/ue1_zmq.conf.txt:$SCRIPT_DIR/../config/ue2_zmq.conf.txt}"
 MPLCONFIGDIR_PATH="${MPLCONFIGDIR_PATH:-/tmp/pi-leic-matplotlib}"
 DASHBOARD_ENABLED="${DASHBOARD_ENABLED:-1}"
+API_ENABLED="${API_ENABLED:-1}"
+API_HOST="${API_HOST:-0.0.0.0}"
+API_PORT="${API_PORT:-8000}"
 HEALTHCHECK_ENABLED="${HEALTHCHECK_ENABLED:-1}"
 HEALTHCHECK_STRICT="${HEALTHCHECK_STRICT:-0}"
 HEALTHCHECK_REQUIRE_UE_DATA_PATH="${HEALTHCHECK_REQUIRE_UE_DATA_PATH:-1}"
@@ -107,7 +112,7 @@ Actions:
   start (default)  Start the stage.
   --stop           Stop supervised units and remove UE namespaces.
   --status         Show core and supervised unit status.
-  --logs NAME      Follow logs for one component. Examples: core, collector, dashboard, gnb1, ue1
+  --logs NAME      Follow logs for one component. Examples: core, collector, api, dashboard, gnb1, ue1
 
 Options:
   --mode MODE      Launch mode: supervised (default) or terminals.
@@ -116,13 +121,14 @@ Options:
   --help           Show this message.
 
 Environment overrides:
-  WORKDIR, MODE, PYTHON_BIN, VENV_DIR, REQUIREMENTS_FILE, METRICS_SCRIPT, DASHBOARD_SCRIPT
+  WORKDIR, MODE, PYTHON_BIN, VENV_DIR, REQUIREMENTS_FILE, METRICS_SCRIPT, DASHBOARD_SCRIPT, API_SCRIPT
   METRICS_SOURCES_CONFIG, METRICS_OUT, GNB_BIN, UE_BIN, GNB_CONFIGS, UE_CONFIGS
   METRICS_LOG_INCLUDE_ROTATED, METRICS_LOG_MAX_ARCHIVES
-  METRICS_SQLITE_ENABLED, METRICS_SQLITE_PATH
+  METRICS_SQLITE_ENABLED, METRICS_SQLITE_PATH, METRICS_TRANSPORT_BACKEND
   FRESHNESS_CHECK_MODE, FRESHNESS_AGE_WINDOW_SECONDS
   FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS
-  DASHBOARD_ENABLED, HEALTHCHECK_ENABLED, HEALTHCHECK_STRICT
+  DASHBOARD_ENABLED, API_ENABLED, API_HOST, API_PORT
+  HEALTHCHECK_ENABLED, HEALTHCHECK_STRICT
   HEALTHCHECK_REQUIRE_UE_DATA_PATH, HEALTHCHECK_FAIL_FAST_ON_ATTACH_ERRORS
   HEALTHCHECK_UE_FAILURE_REGEX, HEALTHCHECK_AMF_FAILURE_REGEX
   HEALTHCHECK_TIMEOUT_SECONDS, HEALTHCHECK_POLL_SECONDS
@@ -361,7 +367,7 @@ prepare_python_env() {
     "$PYTHON_BIN_RESOLVED" -m venv "$VENV_DIR_PATH"
   fi
 
-  if ! "$VENV_DIR_PATH/bin/python" -c 'import matplotlib, websocket' >/dev/null 2>&1; then
+  if ! "$VENV_DIR_PATH/bin/python" -c 'import matplotlib, websocket, fastapi, uvicorn' >/dev/null 2>&1; then
     "$VENV_DIR_PATH/bin/python" -m pip install -r "$REQUIREMENTS_FILE_PATH"
   fi
 }
@@ -495,10 +501,26 @@ start_user_unit() {
   root_runtime_start_user_unit "$@"
 }
 
+prepare_healthcheck_baseline_and_markers() {
+  if [[ -n "$HEALTHCHECK_METRICS_BASELINE_FILE" ]]; then
+    rm -f "$HEALTHCHECK_METRICS_BASELINE_FILE" >/dev/null 2>&1 || true
+  fi
+
+  HEALTHCHECK_METRICS_BASELINE_FILE="$(mktemp)"
+  metrics_contract_write_baseline_signatures "$HEALTHCHECK_METRICS_BASELINE_FILE" "${METRICS_SOURCE_IDS[@]}"
+
+  HEALTHCHECK_START_EPOCH="$(date +%s)"
+  HEALTHCHECK_AMF_LOG_START_LINE="$(root_file_line_count "$CORE_AMF_LOG_PATH")"
+  HEALTHCHECK_SMF_LOG_START_LINE="$(root_file_line_count "$CORE_SMF_LOG_PATH")"
+
+  root_file_line_count "$CORE_UPF_LOG_PATH"
+}
+
 start_supervised_stack() {
   require_supervised_runtime_prereqs
 
   local collector_unit
+  local api_unit
   local dashboard_unit
   local gnb_config
   local ue_config
@@ -511,6 +533,7 @@ start_supervised_stack() {
   local smf_log_start_line
   local upf_log_start_line
   local -a collector_args
+  local -a api_args
   local -a dashboard_args
 
   if [[ "$DRY_RUN" != "1" ]]; then
@@ -522,18 +545,9 @@ start_supervised_stack() {
   cleanup_stale_lab_processes
   start_line="$(metrics_line_count)"
 
-  if [[ -n "$HEALTHCHECK_METRICS_BASELINE_FILE" ]]; then
-    rm -f "$HEALTHCHECK_METRICS_BASELINE_FILE" >/dev/null 2>&1 || true
-  fi
-  HEALTHCHECK_METRICS_BASELINE_FILE="$(mktemp)"
-  metrics_contract_write_baseline_signatures "$HEALTHCHECK_METRICS_BASELINE_FILE" "${METRICS_SOURCE_IDS[@]}"
-
-  HEALTHCHECK_START_EPOCH="$(date +%s)"
-  HEALTHCHECK_AMF_LOG_START_LINE="$(root_file_line_count "$CORE_AMF_LOG_PATH")"
+  upf_log_start_line="$(prepare_healthcheck_baseline_and_markers)"
   amf_log_start_line="$HEALTHCHECK_AMF_LOG_START_LINE"
-  smf_log_start_line="$(root_file_line_count "$CORE_SMF_LOG_PATH")"
-  HEALTHCHECK_SMF_LOG_START_LINE="$smf_log_start_line"
-  upf_log_start_line="$(root_file_line_count "$CORE_UPF_LOG_PATH")"
+  smf_log_start_line="$HEALTHCHECK_SMF_LOG_START_LINE"
   HEALTHCHECK_ROOT_UNITS=("${ROOT_UNIT_NAMES[@]}")
   HEALTHCHECK_USER_UNITS=(
     "$(user_unit_name "metrics-collector")"
@@ -562,6 +576,7 @@ start_supervised_stack() {
     "--setenv=METRICS_OUT=$METRICS_OUT_PATH"
     "--setenv=METRICS_SQLITE_ENABLED=$METRICS_SQLITE_ENABLED"
     "--setenv=METRICS_SQLITE_PATH=$METRICS_SQLITE_PATH"
+    "--setenv=METRICS_TRANSPORT_BACKEND=$METRICS_TRANSPORT_BACKEND"
     "$VENV_DIR_PATH/bin/python"
     -u
     "$METRICS_SCRIPT_PATH"
@@ -569,7 +584,44 @@ start_supervised_stack() {
   append_env_arg_if_set collector_args METRICS_SQLITE_TIMEOUT_SECONDS
   append_env_arg_if_set collector_args METRICS_SQLITE_RETRY_MAX_FAILURES
   append_env_arg_if_set collector_args METRICS_SQLITE_RETRY_COOLDOWN_SECONDS
+  append_env_arg_if_set collector_args METRICS_SQLITE_RETENTION_MAX_AGE_DAYS
+  append_env_arg_if_set collector_args METRICS_SQLITE_RETENTION_MAX_ROWS
+  append_env_arg_if_set collector_args METRICS_SQLITE_RETENTION_INTERVAL_EVENTS
+  append_env_arg_if_set collector_args METRICS_SQLITE_RETENTION_VACUUM
   start_user_unit "$collector_unit" "PI-LEIC Metrics Collector" "${collector_args[@]}"
+
+  if [[ "$API_ENABLED" == "1" ]]; then
+    api_unit="$(user_unit_name "metrics-api")"
+    api_args=(
+      "--setenv=METRICS_OUT=$METRICS_OUT_PATH"
+      "--setenv=METRICS_LOG_INCLUDE_ROTATED=$METRICS_LOG_INCLUDE_ROTATED"
+      "--setenv=METRICS_LOG_MAX_ARCHIVES=$METRICS_LOG_MAX_ARCHIVES"
+      "--setenv=METRICS_SQLITE_ENABLED=$METRICS_SQLITE_ENABLED"
+      "--setenv=METRICS_SQLITE_PATH=$METRICS_SQLITE_PATH"
+      "--setenv=METRICS_INGESTION_TRANSPORT=$METRICS_TRANSPORT_BACKEND"
+      "--setenv=API_HOST=$API_HOST"
+      "--setenv=API_PORT=$API_PORT"
+      "$VENV_DIR_PATH/bin/python"
+      -u
+      "$API_SCRIPT_PATH"
+    )
+    append_env_arg_if_set api_args API_SCHEMA_VERSION
+    append_env_arg_if_set api_args ALERT_STALE_AFTER_SECONDS
+    append_env_arg_if_set api_args ALERT_MIN_DL_BRATE
+    append_env_arg_if_set api_args ALERT_MIN_UL_BRATE
+    append_env_arg_if_set api_args ALERT_RULESET_VERSION
+    append_env_arg_if_set api_args API_AUDIT_DB_ENABLED
+    append_env_arg_if_set api_args API_AUDIT_DB_PATH
+    append_env_arg_if_set api_args API_AUDIT_DB_TIMEOUT_SECONDS
+    append_env_arg_if_set api_args QUERY_BACKEND_MODE
+    append_env_arg_if_set api_args METRICS_INGESTION_TRANSPORT
+    append_env_arg_if_set api_args D1_TARGET_TRANSPORT
+    append_env_arg_if_set api_args FRESHNESS_CHECK_MODE
+    append_env_arg_if_set api_args FRESHNESS_AGE_WINDOW_SECONDS
+    append_env_arg_if_set api_args FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS
+    start_user_unit "$api_unit" "PI-LEIC Metrics REST API" "${api_args[@]}"
+    HEALTHCHECK_USER_UNITS+=("$api_unit")
+  fi
 
   if [[ "$DASHBOARD_ENABLED" == "1" ]]; then
     if display_available; then
@@ -629,6 +681,7 @@ start_supervised_stack() {
 start_terminal_stack() {
   local core_command
   local collector_command
+  local api_command
   local dashboard_command
   local gnb_config
   local ue_config
@@ -661,15 +714,7 @@ start_terminal_stack() {
   cleanup_stale_lab_processes
   start_line="$(metrics_line_count)"
 
-  if [[ -n "$HEALTHCHECK_METRICS_BASELINE_FILE" ]]; then
-    rm -f "$HEALTHCHECK_METRICS_BASELINE_FILE" >/dev/null 2>&1 || true
-  fi
-  HEALTHCHECK_METRICS_BASELINE_FILE="$(mktemp)"
-  metrics_contract_write_baseline_signatures "$HEALTHCHECK_METRICS_BASELINE_FILE" "${METRICS_SOURCE_IDS[@]}"
-
-  HEALTHCHECK_START_EPOCH="$(date +%s)"
-  HEALTHCHECK_AMF_LOG_START_LINE="$(root_file_line_count "$CORE_AMF_LOG_PATH")"
-  HEALTHCHECK_SMF_LOG_START_LINE="$(root_file_line_count "$CORE_SMF_LOG_PATH")"
+  prepare_healthcheck_baseline_and_markers >/dev/null
   HEALTHCHECK_ROOT_UNITS=()
   HEALTHCHECK_USER_UNITS=()
 
@@ -688,7 +733,23 @@ export METRICS_SOURCES_CONFIG='$METRICS_SOURCES_CONFIG_PATH'
 export METRICS_OUT='$METRICS_OUT_PATH'
 export METRICS_SQLITE_ENABLED='$METRICS_SQLITE_ENABLED'
 export METRICS_SQLITE_PATH='$METRICS_SQLITE_PATH'
+export METRICS_TRANSPORT_BACKEND='$METRICS_TRANSPORT_BACKEND'
 '$VENV_DIR_PATH/bin/python' -u '$METRICS_SCRIPT_PATH'
+EOF
+  )"
+
+  api_command="$(
+    cat <<EOF
+cd '$WORKDIR'
+export METRICS_OUT='$METRICS_OUT_PATH'
+export METRICS_LOG_INCLUDE_ROTATED='$METRICS_LOG_INCLUDE_ROTATED'
+export METRICS_LOG_MAX_ARCHIVES='$METRICS_LOG_MAX_ARCHIVES'
+export METRICS_SQLITE_ENABLED='$METRICS_SQLITE_ENABLED'
+export METRICS_SQLITE_PATH='$METRICS_SQLITE_PATH'
+export METRICS_INGESTION_TRANSPORT='$METRICS_TRANSPORT_BACKEND'
+export API_HOST='$API_HOST'
+export API_PORT='$API_PORT'
+'$VENV_DIR_PATH/bin/python' -u '$API_SCRIPT_PATH'
 EOF
   )"
 
@@ -731,11 +792,23 @@ EOF
 
   open_terminal "Metrics Collector" "$collector_command"
 
+  if [[ "$API_ENABLED" == "1" ]]; then
+    open_terminal "Metrics API" "$api_command"
+  fi
+
   if [[ "$DASHBOARD_ENABLED" == "1" ]]; then
     open_terminal "Metrics Dashboard" "$dashboard_command"
-    terminal_count=$((1 + ${#GNB_CONFIG_PATHS[@]} + ${#UE_CONFIG_PATHS[@]} + 2))
+    if [[ "$API_ENABLED" == "1" ]]; then
+      terminal_count=$((1 + ${#GNB_CONFIG_PATHS[@]} + ${#UE_CONFIG_PATHS[@]} + 3))
+    else
+      terminal_count=$((1 + ${#GNB_CONFIG_PATHS[@]} + ${#UE_CONFIG_PATHS[@]} + 2))
+    fi
   else
-    terminal_count=$((1 + ${#GNB_CONFIG_PATHS[@]} + ${#UE_CONFIG_PATHS[@]} + 1))
+    if [[ "$API_ENABLED" == "1" ]]; then
+      terminal_count=$((1 + ${#GNB_CONFIG_PATHS[@]} + ${#UE_CONFIG_PATHS[@]} + 2))
+    else
+      terminal_count=$((1 + ${#GNB_CONFIG_PATHS[@]} + ${#UE_CONFIG_PATHS[@]} + 1))
+    fi
   fi
 
   if [[ "$DRY_RUN" == "1" ]]; then
@@ -789,6 +862,9 @@ show_component_logs() {
     collector)
       exec journalctl --user -u "$(user_unit_name "metrics-collector")" -f
       ;;
+    api)
+      exec journalctl --user -u "$(user_unit_name "metrics-api")" -f
+      ;;
     dashboard)
       exec journalctl --user -u "$(user_unit_name "dashboard")" -f
       ;;
@@ -799,7 +875,7 @@ show_component_logs() {
         exec sudo -n journalctl -u "$unit" -f
       fi
       echo "Unknown log target: $target" >&2
-      echo "Use one of: core, collector, dashboard, $(join_by ', ' "${COMPONENT_KEYS[@]}")" >&2
+      echo "Use one of: core, collector, api, dashboard, $(join_by ', ' "${COMPONENT_KEYS[@]}")" >&2
       exit 1
       ;;
   esac
@@ -827,6 +903,7 @@ UE_BIN_RESOLVED="$(resolve_executable "$UE_BIN")"
 REQUIREMENTS_FILE_PATH="$(resolve_path "$WORKDIR" "$REQUIREMENTS_FILE")"
 METRICS_SCRIPT_PATH="$(resolve_path "$WORKDIR" "$METRICS_SCRIPT")"
 DASHBOARD_SCRIPT_PATH="$(resolve_path "$WORKDIR" "$DASHBOARD_SCRIPT")"
+API_SCRIPT_PATH="$(resolve_path "$WORKDIR" "$API_SCRIPT")"
 METRICS_SOURCES_CONFIG_PATH="$(resolve_path "$WORKDIR" "$METRICS_SOURCES_CONFIG")"
 METRICS_OUT_PATH="$(resolve_path "$WORKDIR" "$METRICS_OUT")"
 VENV_DIR_PATH="$(resolve_path "$WORKDIR" "$VENV_DIR")"
@@ -835,6 +912,7 @@ REPO_ROOT_PATH="$(cd -- "$(dirname -- "$METRICS_SOURCES_CONFIG_PATH")/.." && pwd
 require_file "Requirements file" "$REQUIREMENTS_FILE_PATH"
 require_file "Metrics collector" "$METRICS_SCRIPT_PATH"
 require_file "Dashboard script" "$DASHBOARD_SCRIPT_PATH"
+require_file "Metrics REST API script" "$API_SCRIPT_PATH"
 require_file "Metrics sources config" "$METRICS_SOURCES_CONFIG_PATH"
 
 resolve_config_list "$WORKDIR" "$GNB_CONFIGS" GNB_CONFIG_PATHS
@@ -869,6 +947,7 @@ ROOT_UNIT_NAMES=()
 UE_ROOT_UNIT_NAMES=()
 USER_UNIT_NAMES=(
   "$(user_unit_name "metrics-collector")"
+  "$(user_unit_name "metrics-api")"
   "$(user_unit_name "dashboard")"
 )
 HEALTHCHECK_ROOT_UNITS=()

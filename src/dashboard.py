@@ -3,32 +3,34 @@ import json
 import os
 import sys
 from pathlib import Path
+from typing import Any, Dict, List, Optional, Tuple
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from metrics_api import MetricsLogReader
+from env_utils import parse_bool_env, parse_non_negative_int_env  # noqa: E402
+from metrics_api import MetricsLogReader  # noqa: E402
 
-LOG_FILE = Path(os.environ.get("METRICS_OUT", SCRIPT_DIR / "../metrics/gnb_metrics.jsonl"))
-LOG_INCLUDE_ROTATED = os.environ.get("METRICS_LOG_INCLUDE_ROTATED", "1") != "0"
-LOG_MAX_ARCHIVES = int(os.environ.get("METRICS_LOG_MAX_ARCHIVES", "5"))
-SQLITE_ENABLED = os.environ.get("METRICS_SQLITE_ENABLED", "1") != "0"
-SQLITE_PATH = Path(os.environ.get("METRICS_SQLITE_PATH", "/tmp/pi-leic-metrics.sqlite"))
+LOG_FILE: Path = Path(os.environ.get("METRICS_OUT", str(SCRIPT_DIR / "../metrics/gnb_metrics.jsonl")))
+LOG_INCLUDE_ROTATED: bool = parse_bool_env("METRICS_LOG_INCLUDE_ROTATED", True)
+LOG_MAX_ARCHIVES: int = parse_non_negative_int_env("METRICS_LOG_MAX_ARCHIVES", 5)
+SQLITE_ENABLED: bool = parse_bool_env("METRICS_SQLITE_ENABLED", True)
+SQLITE_PATH: Path = Path(os.environ.get("METRICS_SQLITE_PATH", "/tmp/pi-leic-metrics.sqlite"))
 
-READER = None
-fig = None
-ax1 = None
-ax2 = None
-ani = None
-_animation = None
-_pyplot = None
-_reader_error_reported = False
+READER: Optional[MetricsLogReader] = None
+fig: Optional[Any] = None
+ax1: Optional[Any] = None
+ax2: Optional[Any] = None
+ani: Optional[Any] = None
+_animation: Optional[Any] = None
+_pyplot: Optional[Any] = None
+_reader_error_reported: bool = False
 
-history_by_entity = {}
-last_sample_signature_by_entity = {}
-entity_colors = {}
-palette = [
+history_by_entity: Dict[Tuple, Dict[str, List]] = {}
+last_sample_signature_by_entity: Dict[Tuple, str] = {}
+entity_colors: Dict[Tuple, str] = {}
+palette: List[str] = [
     "tab:blue",
     "tab:orange",
     "tab:green",
@@ -108,14 +110,26 @@ def animate(_):
 
     try:
         latest_by_source = READER.latest_cells_by_source()
-    except (OSError, ValueError, TypeError, RuntimeError) as exc:
+    except Exception as exc:  # noqa: BLE001
         if not _reader_error_reported:
             print(f"Failed to read latest metrics snapshot: {exc}", file=sys.stderr)
             _reader_error_reported = True
-        return
+        latest_by_source = {}
 
     _reader_error_reported = False
     if not latest_by_source:
+        ax1.clear()
+        ax2.clear()
+        ax1.set_title("Performance de Dados em Tempo Real (5G NR)")
+        ax1.set_ylabel("kbps")
+        ax1.text(
+            0.5, 0.5, "Waiting for metrics...",
+            transform=ax1.transAxes,
+            ha="center", va="center", fontsize=12, color="gray",
+        )
+        ax2.set_title("Qualidade do Sinal")
+        ax2.set_ylabel("dB")
+        ax2.set_xlabel("Amostras (segundos)")
         return
 
     for source_id, source_metrics in latest_by_source.items():

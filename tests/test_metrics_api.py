@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.metrics_api import MetricsLogReader
+from src.metrics_api import MetricsLogReader, parse_timestamp_to_epoch
 
 
 class MetricsApiTests(unittest.TestCase):
@@ -79,7 +79,8 @@ class MetricsApiTests(unittest.TestCase):
                     collector_timestamp TEXT NOT NULL,
                     source_id TEXT NOT NULL,
                     gnb_id TEXT,
-                    ws_url TEXT,
+                    source_endpoint TEXT,
+                    event_type TEXT,
                     metric_family TEXT,
                     event_timestamp TEXT,
                     raw_json TEXT NOT NULL
@@ -113,17 +114,19 @@ class MetricsApiTests(unittest.TestCase):
                         collector_timestamp,
                         source_id,
                         gnb_id,
-                        ws_url,
+                        source_endpoint,
+                        event_type,
                         metric_family,
                         event_timestamp,
                         raw_json
-                    ) VALUES (?, ?, ?, ?, ?, ?, ?)
+                    ) VALUES (?, ?, ?, ?, ?, ?, ?, ?)
                     """,
                     (
                         row["collector_timestamp"],
                         row["source_id"],
                         row.get("gnb_id", row["source_id"]),
-                        row.get("ws_url", "ws://127.0.0.1:55555"),
+                        row.get("source_endpoint", "ws://127.0.0.1:55555"),
+                        row.get("event_type", "metric"),
                         "cells",
                         row.get("event_timestamp", row["collector_timestamp"]),
                         json.dumps({"raw_payload": row.get("payload", {})}),
@@ -293,6 +296,71 @@ class MetricsApiTests(unittest.TestCase):
         reader = MetricsLogReader(self.log_file, include_rotated=False)
         self.assertEqual(reader.source_sequences(), {"gnb1": 2, "gnb2": 1})
 
+    def test_window_cells_events_prefers_sqlite_when_available(self):
+        self._write_jsonl(
+            self.log_file,
+            [
+                self._event("gnb1", "2026-04-14T10:00:00+00:00", 1, 1),
+            ],
+        )
+
+        sqlite_path = Path(self.temp_dir.name) / "metrics-window.sqlite"
+        self._write_sqlite_snapshot(
+            sqlite_path,
+            [
+                {
+                    "collector_timestamp": "2026-04-14T10:02:00+00:00",
+                    "event_timestamp": "2026-04-14T10:02:00+00:00",
+                    "source_id": "gnb-sqlite",
+                    "entities": [
+                        {
+                            "cell_index": 0,
+                            "ue_index": 0,
+                            "ue_identity": "ue:sqlite",
+                            "pci": 10,
+                            "ue": {
+                                "dl_brate": 100.0,
+                                "ul_brate": 50.0,
+                            },
+                        }
+                    ],
+                }
+            ],
+        )
+
+        reader = MetricsLogReader(
+            self.log_file,
+            include_rotated=False,
+            sqlite_path=sqlite_path,
+            prefer_sqlite=True,
+        )
+        window = reader.window_cells_events(
+            lower_epoch=parse_timestamp_to_epoch("2026-04-14T10:01:00+00:00"),
+            upper_epoch=parse_timestamp_to_epoch("2026-04-14T10:03:00+00:00"),
+        )
+
+        self.assertEqual(len(window), 1)
+        self.assertEqual(window[0]["source_id"], "gnb-sqlite")
+
+    def test_window_cells_events_falls_back_to_jsonl_when_sqlite_missing(self):
+        self._write_jsonl(
+            self.log_file,
+            [
+                self._event("gnb-jsonl", "2026-04-14T10:05:00+00:00", 9, 8),
+            ],
+        )
+
+        reader = MetricsLogReader(
+            self.log_file,
+            include_rotated=False,
+            sqlite_path=Path(self.temp_dir.name) / "missing-window.sqlite",
+            prefer_sqlite=True,
+        )
+        window = reader.window_cells_events()
+
+        self.assertEqual(len(window), 1)
+        self.assertEqual(window[0]["source_id"], "gnb-jsonl")
+
     def test_latest_sample_epoch_by_source_uses_collector_timestamp_fallback(self):
         self._write_jsonl(
             self.log_file,
@@ -321,6 +389,81 @@ class MetricsApiTests(unittest.TestCase):
 
         self.assertIn("gnb1", sample_epochs)
         self.assertIsNotNone(sample_epochs["gnb1"])
+
+    def test_window_cells_events_sqlite_filters_by_timestamp_bounds(self):
+        sqlite_path = Path(self.temp_dir.name) / "metrics-bounds.sqlite"
+        self._write_sqlite_snapshot(
+            sqlite_path,
+            [
+                {
+                    "collector_timestamp": "2026-04-14T10:00:00+00:00",
+                    "event_timestamp": "2026-04-14T10:00:00+00:00",
+                    "source_id": "gnb1",
+                    "entities": [
+                        {
+                            "cell_index": 0,
+                            "ue_index": 0,
+                            "ue_identity": "ue:before",
+                            "ue": {"dl_brate": 1.0, "ul_brate": 1.0},
+                        }
+                    ],
+                },
+                {
+                    "collector_timestamp": "2026-04-14T10:05:00+00:00",
+                    "event_timestamp": "2026-04-14T10:05:00+00:00",
+                    "source_id": "gnb1",
+                    "entities": [
+                        {
+                            "cell_index": 0,
+                            "ue_index": 0,
+                            "ue_identity": "ue:inside",
+                            "ue": {"dl_brate": 2.0, "ul_brate": 2.0},
+                        }
+                    ],
+                },
+                {
+                    "collector_timestamp": "2026-04-14T10:10:00+00:00",
+                    "event_timestamp": "2026-04-14T10:10:00+00:00",
+                    "source_id": "gnb1",
+                    "entities": [
+                        {
+                            "cell_index": 0,
+                            "ue_index": 0,
+                            "ue_identity": "ue:after",
+                            "ue": {"dl_brate": 3.0, "ul_brate": 3.0},
+                        }
+                    ],
+                },
+            ],
+        )
+
+        reader = MetricsLogReader(
+            self.log_file,
+            include_rotated=False,
+            sqlite_path=sqlite_path,
+            prefer_sqlite=True,
+        )
+        window = reader.window_cells_events(
+            lower_epoch=parse_timestamp_to_epoch("2026-04-14T10:02:00+00:00"),
+            upper_epoch=parse_timestamp_to_epoch("2026-04-14T10:07:00+00:00"),
+        )
+
+        self.assertEqual(len(window), 1)
+        identities = [e["ue_identity"] for entry in window for e in entry["entities"]]
+        self.assertIn("ue:inside", identities)
+        self.assertNotIn("ue:before", identities)
+        self.assertNotIn("ue:after", identities)
+
+    def test_iter_log_paths_handles_archive_gaps_and_max_archives(self):
+        self._write_jsonl(self.log_file.with_name("metrics.jsonl.4"), [self._event("gnb1", "t0", 1, 1)])
+        self._write_jsonl(self.log_file.with_name("metrics.jsonl.2"), [self._event("gnb1", "t1", 1, 1)])
+        self._write_jsonl(self.log_file.with_name("metrics.jsonl.1"), [self._event("gnb1", "t2", 1, 1)])
+        self._write_jsonl(self.log_file, [self._event("gnb1", "t3", 1, 1)])
+
+        reader = MetricsLogReader(self.log_file, include_rotated=True, max_archives=2)
+        path_names = [path.name for path in reader.iter_log_paths()]
+
+        self.assertEqual(path_names, ["metrics.jsonl.2", "metrics.jsonl.1", "metrics.jsonl"])
 
 
 if __name__ == "__main__":

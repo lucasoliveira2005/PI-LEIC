@@ -14,9 +14,11 @@ METRICS_SQLITE_PATH="${METRICS_SQLITE_PATH:-/tmp/pi-leic-metrics.sqlite}"
 FRESHNESS_CHECK_MODE="${FRESHNESS_CHECK_MODE:-hybrid}"
 FRESHNESS_AGE_WINDOW_SECONDS="${FRESHNESS_AGE_WINDOW_SECONDS:-15}"
 FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS="${FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS:-2}"
-PING_TARGET="${PING_TARGET:-10.45.0.1}"
-PING_COUNT="${PING_COUNT:-4}"
-PING_WAIT_SECONDS="${PING_WAIT_SECONDS:-3}"
+TRAFFIC_TARGET="${TRAFFIC_TARGET:-10.45.0.1}"
+IPERF_DURATION_SECONDS="${IPERF_DURATION_SECONDS:-5}"
+IPERF_PORT="${IPERF_PORT:-5201}"
+IPERF_SERVER_MANAGE="${IPERF_SERVER_MANAGE:-1}"
+TRAFFIC_SETTLE_SECONDS="${TRAFFIC_SETTLE_SECONDS:-3}"
 NET_READY_TIMEOUT_SECONDS="${NET_READY_TIMEOUT_SECONDS:-60}"
 NET_READY_POLL_SECONDS="${NET_READY_POLL_SECONDS:-1}"
 UE_NAMESPACES_RAW="${UE_NAMESPACES:-ue1:ue2}"
@@ -41,16 +43,16 @@ VALIDATE_ALLOW_ROOT="${VALIDATE_ALLOW_ROOT:-0}"
 
 SKIP_PROVISION=0
 SKIP_LAUNCH=0
-SKIP_PING=0
+SKIP_TRAFFIC=0
 
 usage() {
   cat <<EOF
-Usage: bash src/validate_stage.sh [--skip-provision] [--skip-launch] [--skip-ping]
+Usage: bash src/validate_stage.sh [--skip-provision] [--skip-launch] [--skip-traffic]
 
 This validation run:
   1. applies subscriber provisioning
   2. launches the multi-gNB stack
-  3. sends traffic from each UE namespace to ${PING_TARGET}
+  3. runs iperf3 from each UE namespace to ${TRAFFIC_TARGET}
   4. confirms fresh metrics from every configured source
   5. confirms fresh non-zero dl_brate and ul_brate for all observed UE entities
      in every configured source
@@ -58,16 +60,17 @@ This validation run:
 Options:
   --skip-provision  Reuse existing subscribers.
   --skip-launch     Reuse an already running stack.
-  --skip-ping       Skip the traffic generation step.
+  --skip-traffic    Skip the traffic generation step.
   --help            Show this message.
 
 Environment overrides:
-  PYTHON_BIN, METRICS_OUT, METRICS_SOURCES_CONFIG, PING_TARGET, PING_COUNT
+  PYTHON_BIN, METRICS_OUT, METRICS_SOURCES_CONFIG, TRAFFIC_TARGET
+  IPERF_DURATION_SECONDS, IPERF_PORT, IPERF_SERVER_MANAGE
   METRICS_LOG_INCLUDE_ROTATED, METRICS_LOG_MAX_ARCHIVES
   METRICS_SQLITE_ENABLED, METRICS_SQLITE_PATH
   FRESHNESS_CHECK_MODE, FRESHNESS_AGE_WINDOW_SECONDS
   FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS
-  PING_WAIT_SECONDS, NET_READY_TIMEOUT_SECONDS, NET_READY_POLL_SECONDS
+  TRAFFIC_SETTLE_SECONDS, NET_READY_TIMEOUT_SECONDS, NET_READY_POLL_SECONDS
   UE_NAMESPACES, LAUNCH_MODE, LAUNCH_DASHBOARD_ENABLED
   LAUNCH_HEALTHCHECK_ENABLED, LAUNCH_HEALTHCHECK_STRICT
   LAUNCH_HEALTHCHECK_REQUIRE_UE_DATA_PATH
@@ -98,7 +101,11 @@ Notes:
   UE data-path checks are deferred to this script's route wait and ping steps.
   An extra fixed settle delay is still available via LAUNCH_CORE_STABILIZATION_SECONDS
   but defaults to 0.
-  Before pinging, this script also waits for a usable route inside each UE namespace.
+  When IPERF_SERVER_MANAGE=1 (default) this script starts one iperf3 server per UE
+  on consecutive ports (IPERF_PORT, IPERF_PORT+1, ...) so all UE clients can run
+  simultaneously.  Set IPERF_SERVER_MANAGE=0 when servers are already running on
+  TRAFFIC_TARGET.  Before running iperf3, this script waits for a routable path inside
+  each UE namespace.
   This script still performs the stricter validation after traffic generation.
   Freshness policy can be tuned with FRESHNESS_CHECK_MODE
   (signature|sequence|age|hybrid), FRESHNESS_AGE_WINDOW_SECONDS, and
@@ -116,8 +123,8 @@ while [[ $# -gt 0 ]]; do
       SKIP_LAUNCH=1
       shift
       ;;
-    --skip-ping)
-      SKIP_PING=1
+    --skip-traffic)
+      SKIP_TRAFFIC=1
       shift
       ;;
     --help)
@@ -151,6 +158,15 @@ require_command() {
     echo "Missing required command: $1" >&2
     exit 1
   fi
+}
+
+require_sudo_session() {
+  if sudo -n true >/dev/null 2>&1; then
+    return 0
+  fi
+
+  echo "Requesting sudo credentials for validation..."
+  sudo -v
 }
 
 require_file() {
@@ -190,7 +206,6 @@ write_baseline_signatures() {
   "$@" > "$output_file" <<'PY'
 import json
 import sys
-import time
 from pathlib import Path
 
 repo_root = Path(sys.argv[1]).resolve()
@@ -205,49 +220,8 @@ src_dir = repo_root / "src"
 if str(src_dir) not in sys.path:
   sys.path.insert(0, str(src_dir))
 
-from metrics_api import MetricsLogReader, parse_timestamp_to_epoch
-
-
-def source_signature(source_entry):
-  entities = source_entry.get("entities") or []
-
-  normalized_entities = []
-  for entity in entities:
-    if not isinstance(entity, dict):
-      continue
-
-    normalized_entities.append(
-      {
-        "cell_index": entity.get("cell_index"),
-        "ue_index": entity.get("ue_index"),
-        "ue_identity": entity.get("ue_identity"),
-        "pci": entity.get("pci"),
-        "ue": entity.get("ue") if isinstance(entity.get("ue"), dict) else {},
-      }
-    )
-
-  normalized_entities.sort(
-    key=lambda item: (
-      item.get("cell_index", 0),
-      item.get("ue_index", 0),
-      str(item.get("ue_identity", "")),
-    )
-  )
-
-  signature_payload = {
-    "timestamp": source_entry.get("timestamp"),
-    "entities": normalized_entities,
-  }
-  return json.dumps(signature_payload, sort_keys=True, ensure_ascii=False)
-
-
-def coerce_int(value):
-  if value is None:
-    return None
-  try:
-    return int(value)
-  except (TypeError, ValueError):
-    return None
+from metrics_api import MetricsLogReader
+from metrics_liveness import build_baseline_payload
 
 
 reader = MetricsLogReader(
@@ -260,35 +234,11 @@ reader = MetricsLogReader(
 latest_by_source = reader.latest_cells_by_source()
 source_sequences = reader.source_sequences()
 
-baseline_signatures = {}
-baseline_sequences = {}
-baseline_sample_epoch = {}
-
-for source_id in required_sources:
-  source_entry = latest_by_source.get(source_id)
-  if not source_entry:
-    continue
-
-  baseline_signatures[source_id] = source_signature(source_entry)
-
-  sequence = coerce_int(source_entry.get("sequence"))
-  if sequence is None:
-    sequence = coerce_int(source_sequences.get(source_id))
-  if sequence is not None:
-    baseline_sequences[source_id] = sequence
-
-  sample_epoch = parse_timestamp_to_epoch(source_entry.get("timestamp"))
-  if sample_epoch is None:
-    sample_epoch = parse_timestamp_to_epoch(source_entry.get("collector_timestamp"))
-  if sample_epoch is not None:
-    baseline_sample_epoch[source_id] = sample_epoch
-
-baseline_payload = {
-  "captured_at_epoch": time.time(),
-  "signatures": baseline_signatures,
-  "sequences": baseline_sequences,
-  "sample_epoch": baseline_sample_epoch,
-}
+baseline_payload = build_baseline_payload(
+  latest_by_source,
+  source_sequences,
+  required_sources,
+)
 print(json.dumps(baseline_payload, sort_keys=True, ensure_ascii=False))
 PY
 }
@@ -306,10 +256,7 @@ validate_metrics() {
   "$METRICS_SQLITE_PATH" \
   "$baseline_file" \
   "$@" <<'PY'
-import json
-import os
 import sys
-import time
 from pathlib import Path
 
 repo_root = Path(sys.argv[1]).resolve()
@@ -325,123 +272,15 @@ src_dir = repo_root / "src"
 if str(src_dir) not in sys.path:
     sys.path.insert(0, str(src_dir))
 
-try:
-  from metrics_api import MetricsLogReader, parse_timestamp_to_epoch
-except ImportError as exc:  # pragma: no cover - runtime safety in shell-embedded script
-  raise SystemExit(f"Unable to import shared metrics reader helper: {exc}")
-
-
-def source_signature(source_entry):
-  entities = source_entry.get("entities") or []
-
-  normalized_entities = []
-  for entity in entities:
-    if not isinstance(entity, dict):
-      continue
-
-    normalized_entities.append(
-      {
-        "cell_index": entity.get("cell_index"),
-        "ue_index": entity.get("ue_index"),
-        "ue_identity": entity.get("ue_identity"),
-        "pci": entity.get("pci"),
-        "ue": entity.get("ue") if isinstance(entity.get("ue"), dict) else {},
-      }
-    )
-
-  normalized_entities.sort(
-    key=lambda item: (
-      item.get("cell_index", 0),
-      item.get("ue_index", 0),
-      str(item.get("ue_identity", "")),
-    )
-  )
-
-  signature_payload = {
-    "timestamp": source_entry.get("timestamp"),
-    "entities": normalized_entities,
-  }
-  return json.dumps(signature_payload, sort_keys=True, ensure_ascii=False)
-
-
-def coerce_int(value):
-  if value is None:
-    return None
-  try:
-    return int(value)
-  except (TypeError, ValueError):
-    return None
-
-
-def coerce_float(value):
-  if value is None:
-    return None
-  try:
-    return float(value)
-  except (TypeError, ValueError):
-    return None
-
-
-def parse_non_negative_float_env(name, default):
-  raw = os.environ.get(name)
-  if raw is None:
-    return default
-
-  try:
-    value = float(raw)
-  except ValueError:
-    return default
-
-  if value < 0:
-    return default
-
-  return value
-
-
-def load_baseline_payload(path):
-  try:
-    raw_payload = json.loads(path.read_text(encoding="utf-8"))
-  except (FileNotFoundError, OSError, json.JSONDecodeError):
-    raw_payload = {}
-
-  if not isinstance(raw_payload, dict):
-    return 0.0, {}, {}, {}
-
-  if (
-    "signatures" in raw_payload
-    or "sequences" in raw_payload
-    or "sample_epoch" in raw_payload
-  ):
-    signatures = raw_payload.get("signatures")
-    sequences = raw_payload.get("sequences")
-    sample_epoch = raw_payload.get("sample_epoch")
-    captured_at_epoch = coerce_float(raw_payload.get("captured_at_epoch")) or 0.0
-
-    if not isinstance(signatures, dict):
-      signatures = {}
-    if not isinstance(sequences, dict):
-      sequences = {}
-    if not isinstance(sample_epoch, dict):
-      sample_epoch = {}
-
-    return captured_at_epoch, signatures, sequences, sample_epoch
-
-  return 0.0, raw_payload, {}, {}
-
-
-freshness_mode = os.environ.get("FRESHNESS_CHECK_MODE", "hybrid").strip().lower()
-if freshness_mode not in {"signature", "sequence", "age", "hybrid"}:
-  freshness_mode = "hybrid"
-
-freshness_age_window_seconds = parse_non_negative_float_env(
-  "FRESHNESS_AGE_WINDOW_SECONDS",
-  15.0,
-)
-freshness_clock_skew_tolerance_seconds = parse_non_negative_float_env(
-  "FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS",
-  2.0,
+from metrics_api import MetricsLogReader
+from metrics_liveness import (
+  evaluate_source_freshness,
+  load_baseline_payload,
+  settings_from_env,
 )
 
+
+settings = settings_from_env()
 baseline_captured_at_epoch, baseline_signatures, baseline_sequences, baseline_sample_epoch = load_baseline_payload(
   baseline_file
 )
@@ -470,64 +309,17 @@ for source_id in required_sources:
     continue
 
   seen_sources.add(source_id)
-
-  baseline_signature = baseline_signatures.get(source_id)
-  current_signature = source_signature(source_entry)
-  signature_changed = False
-  if baseline_signature is not None:
-    signature_changed = baseline_signature != current_signature
-
-  baseline_source_known = (
-    source_id in baseline_signatures
-    or source_id in baseline_sequences
-    or source_id in baseline_sample_epoch
+  is_fresh = evaluate_source_freshness(
+    source_id,
+    source_entry,
+    source_sequences,
+    source_sample_epochs,
+    baseline_captured_at_epoch,
+    baseline_signatures,
+    baseline_sequences,
+    baseline_sample_epoch,
+    settings,
   )
-
-  baseline_sequence = coerce_int(baseline_sequences.get(source_id))
-  current_sequence = coerce_int(source_entry.get("sequence"))
-  if current_sequence is None:
-    current_sequence = coerce_int(source_sequences.get(source_id))
-
-  if baseline_sequence is None:
-    sequence_advanced = signature_changed
-  else:
-    sequence_advanced = current_sequence is not None and current_sequence > baseline_sequence
-
-  current_sample_epoch = source_sample_epochs.get(source_id)
-  if current_sample_epoch is None:
-    current_sample_epoch = parse_timestamp_to_epoch(source_entry.get("timestamp"))
-  if current_sample_epoch is None:
-    current_sample_epoch = parse_timestamp_to_epoch(source_entry.get("collector_timestamp"))
-
-  baseline_epoch = coerce_float(baseline_sample_epoch.get(source_id))
-  if baseline_epoch is None and baseline_source_known and baseline_captured_at_epoch > 0:
-    baseline_epoch = baseline_captured_at_epoch
-
-  age_recent = False
-  if current_sample_epoch is not None and freshness_age_window_seconds > 0:
-    age_recent = (time.time() - current_sample_epoch) <= freshness_age_window_seconds
-    if baseline_epoch is not None:
-      age_recent = age_recent and (
-        current_sample_epoch + freshness_clock_skew_tolerance_seconds >= baseline_epoch
-      )
-
-  baseline_has_reference = (
-    baseline_source_known
-    or baseline_signature is not None
-    or baseline_sequence is not None
-    or baseline_epoch is not None
-  )
-
-  if not baseline_has_reference:
-    is_fresh = True
-  elif freshness_mode == "signature":
-    is_fresh = signature_changed
-  elif freshness_mode == "sequence":
-    is_fresh = sequence_advanced
-  elif freshness_mode == "age":
-    is_fresh = age_recent
-  else:
-    is_fresh = signature_changed or sequence_advanced or age_recent
 
   if not is_fresh:
     stale_sources.append(source_id)
@@ -603,36 +395,71 @@ print(
 PY
 }
 
+# Array of PIDs for locally managed iperf3 server instances (one per UE namespace).
+IPERF_SERVER_PIDS=()
+
+start_iperf_servers() {
+  if [[ "$IPERF_SERVER_MANAGE" != "1" ]]; then
+    return 0
+  fi
+
+  # Start one server per UE on sequential ports (IPERF_PORT, IPERF_PORT+1, ...) so
+  # all UE clients can run simultaneously without contending for the same server slot.
+  local idx=0
+  for _ns in "${UE_NAMESPACES[@]}"; do
+    local port=$(( IPERF_PORT + idx ))
+    echo "Starting local iperf3 server on port ${port}..."
+    iperf3 --server --port "$port" >/dev/null 2>&1 &
+    IPERF_SERVER_PIDS+=($!)
+    (( idx++ )) || true
+  done
+  # Brief pause so all servers bind before the first client connects.
+  sleep 0.5
+}
+
+stop_iperf_servers() {
+  if [[ "$IPERF_SERVER_MANAGE" != "1" || ${#IPERF_SERVER_PIDS[@]} -eq 0 ]]; then
+    return 0
+  fi
+
+  echo "Stopping local iperf3 server(s) (pids: ${IPERF_SERVER_PIDS[*]})..."
+  for pid in "${IPERF_SERVER_PIDS[@]}"; do
+    kill "$pid" 2>/dev/null || true
+    wait "$pid" 2>/dev/null || true
+  done
+  IPERF_SERVER_PIDS=()
+}
+
 netns_route_ready() {
   local netns_name="$1"
-  sudo ip netns exec "$netns_name" ip route get "$PING_TARGET" >/dev/null 2>&1
+  sudo -n ip netns exec "$netns_name" ip route get "$TRAFFIC_TARGET" >/dev/null 2>&1
 }
 
 show_netns_debug() {
   local netns_name="$1"
 
   echo "Namespace ${netns_name} addresses:"
-  sudo ip netns exec "$netns_name" ip addr || true
+  sudo -n ip netns exec "$netns_name" ip addr || true
   echo "Namespace ${netns_name} routes:"
-  sudo ip netns exec "$netns_name" ip route || true
+  sudo -n ip netns exec "$netns_name" ip route || true
 }
 
 wait_for_netns_route() {
   local netns_name="$1"
   local deadline=$((SECONDS + NET_READY_TIMEOUT_SECONDS))
 
-  echo "Waiting up to ${NET_READY_TIMEOUT_SECONDS}s for ${netns_name} to gain a route to ${PING_TARGET}..."
+  echo "Waiting up to ${NET_READY_TIMEOUT_SECONDS}s for ${netns_name} to gain a route to ${TRAFFIC_TARGET}..."
 
   while (( SECONDS < deadline )); do
     if netns_route_ready "$netns_name"; then
-      echo "${netns_name} route to ${PING_TARGET} is ready."
+      echo "${netns_name} route to ${TRAFFIC_TARGET} is ready."
       return 0
     fi
 
     sleep "$NET_READY_POLL_SECONDS"
   done
 
-  echo "${netns_name} never gained a route to ${PING_TARGET}." >&2
+  echo "${netns_name} never gained a route to ${TRAFFIC_TARGET}." >&2
   show_netns_debug "$netns_name" >&2
   return 1
 }
@@ -640,12 +467,14 @@ wait_for_netns_route() {
 require_command "$PYTHON_BIN"
 require_command sudo
 require_command ip
+require_command iperf3
 require_file "Metrics sources config" "$METRICS_SOURCES_CONFIG"
+require_sudo_session
 
 cd "$REPO_ROOT"
 
 BASELINE_SIGNATURES_FILE="$(mktemp)"
-trap 'rm -f "$BASELINE_SIGNATURES_FILE"' EXIT
+trap 'stop_iperf_servers; rm -f "$BASELINE_SIGNATURES_FILE"' EXIT
 
 IFS=':' read -r -a UE_NAMESPACES <<< "$UE_NAMESPACES_RAW"
 mapfile -t REQUIRED_SOURCES < <(load_required_sources)
@@ -690,16 +519,40 @@ if [[ "$SKIP_LAUNCH" != "1" ]]; then
     bash src/launch_stack.sh --mode "$LAUNCH_MODE"
 fi
 
-if [[ "$SKIP_PING" != "1" ]]; then
+if [[ "$SKIP_TRAFFIC" != "1" ]]; then
+  start_iperf_servers
+
+  # Wait for each UE namespace to have a routable path to TRAFFIC_TARGET before
+  # starting its iperf3 client.  Route-waits run sequentially (they are fast in
+  # practice and order doesn't matter); iperf3 clients are then all backgrounded
+  # so every UE generates traffic simultaneously, producing concurrent load across
+  # all gNBs rather than sequential single-UE bursts.
+  iperf_pids=()
+  iperf_port_idx=0
   for netns_name in "${UE_NAMESPACES[@]}"; do
     wait_for_netns_route "$netns_name"
-    echo "Sending traffic from ${netns_name} to ${PING_TARGET}..."
-    sudo ip netns exec "$netns_name" ping -c "$PING_COUNT" "$PING_TARGET"
+    local_port=$(( IPERF_PORT + iperf_port_idx ))
+    echo "Running iperf3 from ${netns_name} to ${TRAFFIC_TARGET} for ${IPERF_DURATION_SECONDS}s (port ${local_port})..."
+    sudo -n ip netns exec "$netns_name" iperf3 -c "$TRAFFIC_TARGET" -t "$IPERF_DURATION_SECONDS" -p "$local_port" &
+    iperf_pids+=($!)
+    (( iperf_port_idx++ )) || true
   done
+
+  traffic_failed=0
+  for pid in "${iperf_pids[@]}"; do
+    wait "$pid" || traffic_failed=1
+  done
+
+  stop_iperf_servers
+
+  if [[ "$traffic_failed" != "0" ]]; then
+    echo "One or more iperf3 traffic runs failed." >&2
+    exit 1
+  fi
 fi
 
-echo "Waiting ${PING_WAIT_SECONDS}s for fresh traffic metrics..."
-sleep "$PING_WAIT_SECONDS"
+echo "Waiting ${TRAFFIC_SETTLE_SECONDS}s for fresh traffic metrics..."
+sleep "$TRAFFIC_SETTLE_SECONDS"
 
 echo "Validating fresh metrics..."
 validate_metrics "$BASELINE_SIGNATURES_FILE" "${REQUIRED_SOURCES[@]}"

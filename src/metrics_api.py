@@ -8,13 +8,13 @@ import sqlite3
 import sys
 from datetime import datetime, timezone
 from pathlib import Path
-from typing import Dict, Iterable, Iterator, Optional
+from typing import Any, Dict, Iterable, Iterator, List, Optional
 
 SCRIPT_DIR = Path(__file__).resolve().parent
 if str(SCRIPT_DIR) not in sys.path:
     sys.path.insert(0, str(SCRIPT_DIR))
 
-from metrics_identity import extract_cell_ue_entities
+from metrics_identity import extract_cell_ue_entities  # noqa: E402
 
 
 def extract_payload(entry: Dict) -> Dict:
@@ -71,19 +71,25 @@ class MetricsLogReader:
 
         if self.include_rotated:
             archives = []
-            index = 1
-            while True:
-                archive = self.log_file.with_name(f"{self.log_file.name}.{index}")
-                if not archive.exists():
-                    break
-                archives.append((index, archive))
-                index += 1
+            prefix = f"{self.log_file.name}."
+            for archive in self.log_file.parent.glob(f"{self.log_file.name}.*"):
+                suffix = archive.name[len(prefix):]
+                if not suffix.isdigit():
+                    continue
 
+                index = int(suffix)
+                if index <= 0:
+                    continue
+
+                archives.append((index, archive))
+
+            archives.sort(key=lambda item: item[0])
             if self.max_archives is not None:
                 archives = archives[: max(0, self.max_archives)]
+            archives.sort(key=lambda item: item[0], reverse=True)
 
             # .N is the oldest archive and .1 is the newest archive.
-            for _idx, path in reversed(archives):
+            for _idx, path in archives:
                 paths.append(path)
 
         paths.append(self.log_file)
@@ -110,6 +116,160 @@ class MetricsLogReader:
                             yield event
             except OSError:
                 continue
+
+    @staticmethod
+    def _event_epoch(entry: Dict[str, Any], payload: Optional[Dict[str, Any]] = None) -> Optional[float]:
+        payload_dict = payload if isinstance(payload, dict) else {}
+
+        epoch = parse_timestamp_to_epoch(entry.get("timestamp"))
+        if epoch is None:
+            epoch = parse_timestamp_to_epoch(payload_dict.get("timestamp"))
+        if epoch is None:
+            epoch = parse_timestamp_to_epoch(entry.get("collector_timestamp"))
+
+        return epoch
+
+    def _window_cells_events_from_jsonl(
+        self,
+        lower_epoch: Optional[float],
+        upper_epoch: Optional[float],
+    ) -> List[Dict[str, Any]]:
+        items: List[Dict[str, Any]] = []
+
+        for entry in self.iter_events():
+            source_id = str(entry.get("source_id", "single"))
+            payload = extract_payload(entry)
+            if not isinstance(payload, dict):
+                continue
+
+            entities = extract_cell_ue_entities(payload)
+            if not entities:
+                continue
+
+            event_epoch = self._event_epoch(entry, payload)
+            if lower_epoch is not None and (event_epoch is None or event_epoch < lower_epoch):
+                continue
+            if upper_epoch is not None and (event_epoch is None or event_epoch > upper_epoch):
+                continue
+
+            items.append(
+                {
+                    "source_id": source_id,
+                    "timestamp": entry.get("timestamp") or payload.get("timestamp"),
+                    "collector_timestamp": entry.get("collector_timestamp"),
+                    "metric_family": entry.get("metric_family"),
+                    "event_type": entry.get("event_type"),
+                    "entities": entities,
+                }
+            )
+
+        return items
+
+    def _window_cells_events_from_sqlite(
+        self,
+        lower_epoch: Optional[float],
+        upper_epoch: Optional[float],
+    ) -> Optional[List[Dict[str, Any]]]:
+        if not self.sqlite_path or not self.sqlite_path.exists():
+            return None
+
+        lower_iso = (
+            datetime.fromtimestamp(lower_epoch, timezone.utc).isoformat()
+            if lower_epoch is not None
+            else None
+        )
+        upper_iso = (
+            datetime.fromtimestamp(upper_epoch, timezone.utc).isoformat()
+            if upper_epoch is not None
+            else None
+        )
+
+        query = """
+            SELECT
+                e.id,
+                e.source_id,
+                e.event_timestamp,
+                e.collector_timestamp,
+                e.metric_family,
+                e.event_type,
+                ce.cell_index,
+                ce.ue_index,
+                ce.ue_identity,
+                ce.pci,
+                ce.ue_json
+            FROM metrics_events AS e
+            JOIN metrics_cell_entities AS ce
+              ON ce.event_id = e.id
+            WHERE e.metric_family = 'cells'
+              AND (? IS NULL OR e.collector_timestamp >= ?)
+              AND (? IS NULL OR e.collector_timestamp <= ?)
+            ORDER BY e.collector_timestamp ASC, e.id ASC, ce.cell_index ASC, ce.ue_index ASC
+        """
+
+        try:
+            with sqlite3.connect(str(self.sqlite_path)) as conn:
+                rows = conn.execute(
+                    query, (lower_iso, lower_iso, upper_iso, upper_iso)
+                ).fetchall()
+        except sqlite3.Error:
+            return None
+
+        by_event_id: Dict[int, Dict[str, Any]] = {}
+
+        for (
+            event_id,
+            source_id,
+            event_timestamp,
+            collector_timestamp,
+            metric_family,
+            event_type,
+            cell_index,
+            ue_index,
+            ue_identity,
+            pci,
+            ue_json,
+        ) in rows:
+            entry = by_event_id.get(event_id)
+            if entry is None:
+                entry = {
+                    "source_id": str(source_id),
+                    "timestamp": event_timestamp or collector_timestamp,
+                    "collector_timestamp": collector_timestamp,
+                    "metric_family": metric_family,
+                    "event_type": event_type,
+                    "entities": [],
+                }
+                by_event_id[event_id] = entry
+
+            try:
+                ue_metrics = json.loads(ue_json) if ue_json else {}
+            except json.JSONDecodeError:
+                ue_metrics = {}
+
+            entity = {
+                "cell_index": int(cell_index),
+                "ue_index": int(ue_index),
+                "ue_identity": ue_identity,
+                "ue": ue_metrics,
+            }
+            if pci is not None:
+                entity["pci"] = int(pci)
+
+            entry["entities"].append(entity)
+
+        return [e for e in by_event_id.values() if e.get("entities")]
+
+    def window_cells_events(
+        self,
+        lower_epoch: Optional[float] = None,
+        upper_epoch: Optional[float] = None,
+    ) -> List[Dict[str, Any]]:
+        if self.prefer_sqlite:
+            sqlite_items = self._window_cells_events_from_sqlite(lower_epoch, upper_epoch)
+            if sqlite_items is not None:
+                return sqlite_items
+
+        return self._window_cells_events_from_jsonl(lower_epoch, upper_epoch)
 
     def _latest_cells_by_source_from_jsonl(self) -> Dict[str, Dict]:
         latest_by_source = {}

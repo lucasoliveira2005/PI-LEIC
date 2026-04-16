@@ -113,6 +113,7 @@ your systemd user services.
 - creates `ue1` and `ue2` namespaces automatically before launching the UEs
 - launches `UE1` and `UE2` via `systemd-run`
 - launches the central metrics collector as a user service
+- launches the metrics REST API as a user service (enabled by default)
 - optionally launches the dashboard
 - waits dynamically for Open5GS core readiness (active units, startup log markers, live socket probes, and active endpoint probes) before starting attach-sensitive components
 - runs readiness checks after the supervised stack has actually started
@@ -145,9 +146,17 @@ Useful supervised commands:
 ```bash
 bash src/launch_stack.sh --status
 bash src/launch_stack.sh --logs collector
+bash src/launch_stack.sh --logs api
 bash src/launch_stack.sh --logs gnb1
 bash src/launch_stack.sh --stop
 ```
+
+Launcher/API controls:
+
+- `API_ENABLED` (default `1`)
+- `API_HOST` (default `0.0.0.0`)
+- `API_PORT` (default `8000`)
+- `METRICS_TRANSPORT_BACKEND` (default `websocket`, accepts `websocket` or `zmq`)
 
 If you still want the older GUI-terminal workflow for manual debugging:
 
@@ -182,6 +191,10 @@ Freshness policy controls are available for both launcher readiness and validato
 - `FRESHNESS_AGE_WINDOW_SECONDS` (default `15`)
 - `FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS` (default `2`)
 
+The baseline/signature/sequence/age freshness contract is shared through:
+
+- `src/metrics_liveness.py`
+
 This is the authoritative end-to-end validation flow. By default it launches the stack in supervised mode, enables dynamic core readiness checks before UE attach (including live socket and active endpoint probes), enables strict launch readiness checks for service and metrics health, fails fast on explicit attach/PDU failure signals with categorized cause summaries, disables the dashboard, defers UE data-path checks to this script, waits for each UE namespace to gain a usable route, and validates after real traffic has been generated. If a stale manual run is still holding ZMQ or NG-U ports, the launcher now cleans up the old PI-LEIC lab processes before starting the supervised units.
 
 If you already have part of the stack running, you can skip steps:
@@ -189,6 +202,70 @@ If you already have part of the stack running, you can skip steps:
 ```bash
 bash src/validate_stage.sh --skip-provision --skip-launch
 ```
+
+## Metrics REST API
+
+The network team now also provides a REST interface aligned with the D1 endpoint
+shape for integration and operator workflows:
+
+```bash
+cd /path/to/PI-LEIC
+source src/.venv/bin/activate
+uvicorn src.metrics_rest_api:app --host 0.0.0.0 --port 8000
+```
+
+Implemented endpoints:
+
+- `GET /metrics?cell_id=&from=&to=`
+- `GET /alerts?status=open`
+- `GET /health`
+- `GET /capabilities`
+- `POST /query`
+- `POST /actions`
+
+`GET /metrics` behavior:
+
+- without `from`/`to`: returns the latest per-source snapshot
+- with `from` and/or `to`: returns matching events in that time window
+- includes `transport` metadata (`ingestion`, `d1_target`, `parity`) so clients can
+	detect that ingestion currently runs over WebSocket while D1 target transport is ZMQ
+
+`GET /alerts` behavior:
+
+- rule-based alerts with explicit provenance per item (`rule.id`, `rule.parameters`, `rule.evidence`)
+- current ruleset is threshold-based (`mode=rule-thresholds`), not ML-based anomaly detection
+
+`POST /query` behavior:
+
+- deterministic network-scope stub response (`status=answered_stub`, `reason_code=llm_not_integrated`)
+- includes stable `request_id`, `capabilities`, and `transport` metadata for audit/integration
+
+`POST /actions` behavior:
+
+- `approve=false` returns `status=pending_approval`
+- `approve=true` returns `status=approved_not_executed`
+- requires strict `intent` payload (`target`, `parameter`, `unit`, `proposed_value`, `bounds`, `reason`, `safety_checks`, `dry_run`)
+- current execution mode is `audit-only-stub`; approved requests are persisted but runtime
+	parameter mutation is intentionally disabled in this milestone
+
+REST API audit controls:
+
+- `API_AUDIT_DB_ENABLED` (default `1`)
+- `API_AUDIT_DB_PATH` (default `/tmp/pi-leic-api-audit.sqlite`)
+- `API_AUDIT_DB_TIMEOUT_SECONDS` (default `5`)
+
+REST/API behavior controls:
+
+- `QUERY_BACKEND_MODE` (default `heuristic-stub`)
+- `ALERT_RULESET_VERSION` (default `rules-v1`)
+- `METRICS_INGESTION_TRANSPORT` (default `websocket`)
+- `D1_TARGET_TRANSPORT` (default `zmq`)
+
+Current D1 deferred items (network scope):
+
+- full LLM-backed query/action interpretation
+- live runtime execution pipeline for approved actions
+- strict ZMQ ingestion parity (current ingestion remains WebSocket for this stage)
 
 ## Manual Run
 
@@ -292,6 +369,24 @@ queries:
 - `METRICS_SQLITE_TIMEOUT_SECONDS` (default `5`)
 - `METRICS_SQLITE_RETRY_MAX_FAILURES` (default `5`)
 - `METRICS_SQLITE_RETRY_COOLDOWN_SECONDS` (default `10`)
+- `METRICS_SQLITE_RETENTION_MAX_AGE_DAYS` (default `0`, disabled)
+- `METRICS_SQLITE_RETENTION_MAX_ROWS` (default `200000`)
+- `METRICS_SQLITE_RETENTION_INTERVAL_EVENTS` (default `500`)
+- `METRICS_SQLITE_RETENTION_VACUUM` (default `0`)
+
+Collector transport selection:
+
+- `METRICS_TRANSPORT_BACKEND` (default `websocket`, accepts `websocket` or `zmq`)
+
+WebSocket keepalive controls for metrics source connectivity:
+
+- `METRICS_WS_PING_INTERVAL_SECONDS` (default `15`, set `0` to disable)
+- `METRICS_WS_PING_TIMEOUT_SECONDS` (default `5`)
+
+Collector event contract metadata:
+
+- `schema_version` (default `1.0`, override with `METRICS_SCHEMA_VERSION`)
+- `event_type` (`metric`, `alarm`, or `state`; defaults inferred from payload family)
 
 If SQLite writes fail transiently (for example temporary lock/contention),
 the collector keeps writing JSONL and retries SQLite after a cooldown window.
@@ -347,6 +442,7 @@ python -m unittest discover -s tests -p "test_*.py" -v
 The repository now includes a minimal CI workflow in `.github/workflows/ci.yml` that runs:
 
 - shell syntax checks for launcher/validator scripts
+- rootless shell behavior checks for launcher modules under `src/launch_lib/`
 - Python syntax checks for key scripts
 - unit tests under `tests/`
 

@@ -60,6 +60,7 @@ run_health_checks() {
   local source_seen
   local source_attach
   local source_fresh
+  local health_states_output
 
   if [[ "$HEALTHCHECK_ENABLED" != "1" ]]; then
     return 0
@@ -87,12 +88,20 @@ run_health_checks() {
     inactive_root_units=()
     inactive_user_units=()
 
-    while IFS=$'\t' read -r source_id source_seen source_attach source_fresh; do
-      [[ -n "$source_id" ]] || continue
-      source_seen_map["$source_id"]="$source_seen"
-      source_attach_map["$source_id"]="$source_attach"
-      source_fresh_map["$source_id"]="$source_fresh"
-    done < <(metrics_contract_collect_health_states "$baseline_file" "${METRICS_SOURCE_IDS[@]}" || true)
+    health_states_output=""
+    if ! health_states_output="$(metrics_contract_collect_health_states "$baseline_file" "${METRICS_SOURCE_IDS[@]}" 2>&1)"; then
+      echo "Warning: failed to collect metrics health states:"
+      echo "$health_states_output" | sed 's/^/  /'
+    fi
+
+    if [[ -n "$health_states_output" ]]; then
+      while IFS=$'\t' read -r source_id source_seen source_attach source_fresh; do
+        [[ -n "$source_id" ]] || continue
+        source_seen_map["$source_id"]="$source_seen"
+        source_attach_map["$source_id"]="$source_attach"
+        source_fresh_map["$source_id"]="$source_fresh"
+      done <<< "$health_states_output"
+    fi
 
     for source_id in "${METRICS_SOURCE_IDS[@]}"; do
       if [[ "${source_seen_map[$source_id]:-0}" != "1" ]]; then

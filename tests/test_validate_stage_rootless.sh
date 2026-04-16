@@ -36,6 +36,14 @@ create_stub_commands() {
 
   cat > "$stub_dir/sudo" <<'EOF'
 #!/usr/bin/env bash
+if [[ "${1:-}" == "-n" ]]; then
+  shift
+fi
+
+if [[ "${1:-}" == "-v" ]]; then
+  exit 0
+fi
+
 exec "$@"
 EOF
 
@@ -44,7 +52,12 @@ EOF
 exit 0
 EOF
 
-  chmod +x "$stub_dir/sudo" "$stub_dir/ip"
+  cat > "$stub_dir/iperf3" <<'EOF'
+#!/usr/bin/env bash
+exit 0
+EOF
+
+  chmod +x "$stub_dir/sudo" "$stub_dir/ip" "$stub_dir/iperf3"
 }
 
 run_success_case() {
@@ -65,8 +78,8 @@ run_success_case() {
     PATH="$stub_dir:$PATH" \
     METRICS_OUT="$metrics_file" \
     METRICS_SOURCES_CONFIG="$sources_file" \
-    PING_WAIT_SECONDS=2 \
-    bash "$REPO_ROOT/src/validate_stage.sh" --skip-provision --skip-launch --skip-ping > "$output_file" 2> "$error_file"; then
+    TRAFFIC_SETTLE_SECONDS=2 \
+    bash "$REPO_ROOT/src/validate_stage.sh" --skip-provision --skip-launch --skip-traffic > "$output_file" 2> "$error_file"; then
     wait "$writer_pid" || true
     echo "Expected validate_stage success case to pass" >&2
     cat "$error_file" >&2 || true
@@ -94,8 +107,8 @@ run_failure_case() {
     PATH="$stub_dir:$PATH" \
     METRICS_OUT="$metrics_file" \
     METRICS_SOURCES_CONFIG="$sources_file" \
-    PING_WAIT_SECONDS=2 \
-    bash "$REPO_ROOT/src/validate_stage.sh" --skip-provision --skip-launch --skip-ping > "$output_file" 2> "$error_file"; then
+    TRAFFIC_SETTLE_SECONDS=2 \
+    bash "$REPO_ROOT/src/validate_stage.sh" --skip-provision --skip-launch --skip-traffic > "$output_file" 2> "$error_file"; then
     wait "$writer_pid" || true
     echo "Expected validate_stage failure case to fail" >&2
     exit 1
@@ -131,8 +144,8 @@ run_hybrid_sequence_case() {
     METRICS_OUT="$metrics_file" \
     METRICS_SOURCES_CONFIG="$sources_file" \
     FRESHNESS_CHECK_MODE=hybrid \
-    PING_WAIT_SECONDS=2 \
-    bash "$REPO_ROOT/src/validate_stage.sh" --skip-provision --skip-launch --skip-ping > "$output_file" 2> "$error_file"; then
+    TRAFFIC_SETTLE_SECONDS=2 \
+    bash "$REPO_ROOT/src/validate_stage.sh" --skip-provision --skip-launch --skip-traffic > "$output_file" 2> "$error_file"; then
     wait "$writer_pid" || true
     echo "Expected validate_stage hybrid sequence case to pass" >&2
     cat "$error_file" >&2 || true
