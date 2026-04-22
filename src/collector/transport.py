@@ -1,4 +1,10 @@
-"""Transport adapters: WebSocket and ZMQ source connections."""
+"""Transport adapters: WebSocket source connection.
+
+The current ingestion transport is WebSocket (srsRAN's JSON metrics server).
+The target transport for SC-RIC integration is E2AP/KPM — not ZMQ. A KPM
+adapter will be added in Phase 1; until then the factory only returns the
+WebSocket adapter. Do not add speculative transport implementations here.
+"""
 
 from __future__ import annotations
 
@@ -8,7 +14,6 @@ from typing import Any, Callable, Dict, Optional
 import websocket
 
 from .config import (
-    METRICS_TRANSPORT_BACKEND,
     METRICS_WS_PING_INTERVAL_SECONDS,
     METRICS_WS_PING_TIMEOUT_SECONDS,
 )
@@ -81,48 +86,11 @@ class WebSocketSourceAdapter(SourceTransportAdapter):
                 pass
 
 
-class ZmqSourceAdapter(SourceTransportAdapter):
-    def __init__(self, source: Dict[str, Any]):
-        self.source = source
+def build_transport_adapter(source: Dict[str, Any]) -> SourceTransportAdapter:
+    """Build the transport adapter for *source*.
 
-    def run_once(
-        self,
-        on_open: Callable[[Any], None],
-        on_message: Callable[[Any, str], None],
-        on_error: Callable[[Any, Any], None],
-        on_close: Callable[[Any, Any, Any], None],
-    ) -> None:
-        raise NotImplementedError(
-            "ZMQ transport adapter is not implemented yet. "
-            "Set METRICS_TRANSPORT_BACKEND=websocket for current runtime support."
-        )
-
-    def stop(self) -> None:
-        pass  # No active connection to close until ZMQ is implemented.
-
-
-def build_transport_adapter(
-    source: Dict[str, Any],
-    backend: Optional[str] = None,
-) -> SourceTransportAdapter:
-    """Build the appropriate transport adapter for *source*.
-
-    Parameters
-    ----------
-    source:
-        Source config dict (must contain ``ws_url`` or ``zmq_endpoint`` depending
-        on the active backend).
-    backend:
-        Override the active transport backend.  Defaults to the module-level
-        ``METRICS_TRANSPORT_BACKEND`` env var.  Pass explicitly in tests to avoid
-        monkeypatching module globals.
+    WebSocket is the only supported backend. The future E2SM KPM adapter
+    (Phase 1) will be added as a sibling subclass and this factory will gain
+    source-type dispatch at that point.
     """
-    _backend = backend if backend is not None else METRICS_TRANSPORT_BACKEND
-    if _backend == "websocket":
-        return WebSocketSourceAdapter(source)
-    if _backend == "zmq":
-        return ZmqSourceAdapter(source)
-
-    raise ValueError(
-        f"Unsupported transport backend: {_backend!r}. Supported values: websocket, zmq"
-    )
+    return WebSocketSourceAdapter(source)

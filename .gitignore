@@ -1,8 +1,19 @@
-src/.venv/
+# Python
 *.pyc
-src/srsRAN_Project/
-metrics/*.jsonl                                           
-metrics/*.jsonl.*
 **/__pycache__/
+src/.venv/
+
+# Runtime data
+metrics/*.jsonl
+metrics/*.jsonl.*
 *.sqlite
-*.pyc  
+var/
+
+# Vendored srsRAN build tree (built locally, not tracked)
+src/srsRAN_Project/
+
+# Editor/scratch
+.vscode/
+.idea/
+*.swp
+test_subshell.sh

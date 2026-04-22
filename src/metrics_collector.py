@@ -4,7 +4,7 @@
 The real implementation lives in:
   src/collector/config.py      — environment-variable configuration
   src/collector/enrichment.py  — event enrichment and D1 contract field derivation
-  src/collector/transport.py   — WebSocket / ZMQ adapters
+  src/collector/transport.py   — WebSocket source adapter (E2SM-KPM sibling lands in Phase 1)
   src/collector/storage.py     — JSONL rotation (EventWriter) and SQLite sink
   src/collector/worker.py      — source worker threads, watchdog, main()
 """
@@ -28,7 +28,6 @@ from collector import (  # noqa: E402, F401
     METRICS_SQLITE_RETRY_COOLDOWN_SECONDS,
     METRICS_SQLITE_RETRY_MAX_FAILURES,
     METRICS_SQLITE_TIMEOUT_SECONDS,
-    METRICS_TRANSPORT_BACKEND,
     METRICS_WS_PING_INTERVAL_SECONDS,
     METRICS_WS_PING_TIMEOUT_SECONDS,
     OUT,
@@ -41,7 +40,6 @@ from collector import (  # noqa: E402, F401
     SourceTransportAdapter,
     SQLiteEventSink,
     WebSocketSourceAdapter,
-    ZmqSourceAdapter,
     _watchdog_loop,
     build_transport_adapter,
     classify_event_type,

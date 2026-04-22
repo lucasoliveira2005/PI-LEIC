@@ -19,7 +19,6 @@ from .config import (  # noqa: E402, F401
     METRICS_SQLITE_RETRY_COOLDOWN_SECONDS,
     METRICS_SQLITE_RETRY_MAX_FAILURES,
     METRICS_SQLITE_TIMEOUT_SECONDS,
-    METRICS_TRANSPORT_BACKEND,
     METRICS_WS_PING_INTERVAL_SECONDS,
     METRICS_WS_PING_TIMEOUT_SECONDS,
     OUT,
@@ -43,7 +42,6 @@ from .storage import EventWriter, SQLiteEventSink  # noqa: E402, F401
 from .transport import (  # noqa: E402, F401
     SourceTransportAdapter,
     WebSocketSourceAdapter,
-    ZmqSourceAdapter,
     build_transport_adapter,
     websocket_keepalive_kwargs,
 )

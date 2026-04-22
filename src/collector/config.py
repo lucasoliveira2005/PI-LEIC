@@ -60,9 +60,6 @@ METRICS_WS_PING_INTERVAL_SECONDS: float = parse_non_negative_float_env(
 METRICS_WS_PING_TIMEOUT_SECONDS: float = parse_non_negative_float_env(
     "METRICS_WS_PING_TIMEOUT_SECONDS", 5.0
 )
-METRICS_TRANSPORT_BACKEND: str = (
-    os.environ.get("METRICS_TRANSPORT_BACKEND", "websocket") or "websocket"
-).strip().lower()
 METRICS_SILENCE_THRESHOLD_SECONDS: float = parse_non_negative_float_env(
     "METRICS_SILENCE_THRESHOLD_SECONDS", 30.0
 )

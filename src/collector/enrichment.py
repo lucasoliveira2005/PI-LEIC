@@ -9,29 +9,15 @@ from typing import Dict, List, Optional
 
 from shared.identity import extract_cell_ue_entities
 
-from .config import METRICS_SCHEMA_VERSION, METRICS_TRANSPORT_BACKEND, SOURCES_CONFIG
+from .config import METRICS_SCHEMA_VERSION, SOURCES_CONFIG
 
 
 def required_source_keys() -> List[str]:
-    keys = {"source_id", "gnb_id"}
-    if METRICS_TRANSPORT_BACKEND == "websocket":
-        keys.add("ws_url")
-    elif METRICS_TRANSPORT_BACKEND == "zmq":
-        keys.add("zmq_endpoint")
-    else:
-        raise ValueError(
-            "Unsupported METRICS_TRANSPORT_BACKEND="
-            f"{METRICS_TRANSPORT_BACKEND}. Supported values: websocket, zmq"
-        )
-    return list(keys)
+    return ["source_id", "gnb_id", "ws_url"]
 
 
 def source_endpoint(source: Dict) -> str:
-    if METRICS_TRANSPORT_BACKEND == "websocket":
-        return source.get("ws_url", "-")
-    if METRICS_TRANSPORT_BACKEND == "zmq":
-        return source.get("zmq_endpoint", "-")
-    return "-"
+    return source.get("ws_url", "-")
 
 
 def load_sources() -> List[Dict]:
@@ -49,23 +35,13 @@ def load_sources() -> List[Dict]:
             raise ValueError(f"Missing keys in source config {source}: {missing_str}")
 
         sid = source.get("source_id", "?")
-        if METRICS_TRANSPORT_BACKEND == "websocket":
-            ws_url = source.get("ws_url", "")
-            scheme = urllib.parse.urlparse(ws_url).scheme
-            if scheme not in {"ws", "wss"}:
-                raise ValueError(
-                    f"Source '{sid}' has invalid ws_url '{ws_url}': "
-                    f"scheme must be 'ws' or 'wss', got '{scheme or '(empty)'}'"
-                )
-        elif METRICS_TRANSPORT_BACKEND == "zmq":
-            zmq_endpoint = source.get("zmq_endpoint", "")
-            scheme = urllib.parse.urlparse(zmq_endpoint).scheme
-            if scheme not in {"tcp", "ipc", "inproc", "epgm", "pgm"}:
-                raise ValueError(
-                    f"Source '{sid}' has invalid zmq_endpoint '{zmq_endpoint}': "
-                    f"scheme must be a valid ZMQ transport (tcp, ipc, inproc, ...), "
-                    f"got '{scheme or '(empty)'}'"
-                )
+        ws_url = source.get("ws_url", "")
+        scheme = urllib.parse.urlparse(ws_url).scheme
+        if scheme not in {"ws", "wss"}:
+            raise ValueError(
+                f"Source '{sid}' has invalid ws_url '{ws_url}': "
+                f"scheme must be 'ws' or 'wss', got '{scheme or '(empty)'}'"
+            )
 
     return sources
 
@@ -144,8 +120,8 @@ def extract_contract_fields(payload: Dict) -> Dict:
     """
     contract_fields: Dict = {}
 
-    # Pass through any D1 field already present at the top level — future E2/ZMQ
-    # sources may supply these directly without derivation.
+    # Pass through any contract field already present at the top level — the
+    # future E2SM KPM adapter (Phase 1) will supply these directly.
     for key in (
         "cell_id",
         "ue_id",
@@ -225,7 +201,7 @@ def extract_context(payload: Dict) -> Dict:
 
 def enrich_event(source: Dict, payload: Dict) -> Dict:
     family = metric_family(payload)
-    endpoint_value = source.get("ws_url") or source.get("zmq_endpoint")
+    endpoint_value = source.get("ws_url")
 
     event = {
         "collector_timestamp": datetime.now(timezone.utc).isoformat(),

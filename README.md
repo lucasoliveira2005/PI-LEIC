@@ -1,467 +1,561 @@
 # PI-LEIC
 
-## Current Stage
+A multi-node 5G RAN monitoring and control platform for a university lab at
+FEUP. The repository boots a full 5G stack on a single Linux host (Open5GS
+core, two srsRAN gNBs, two srsUEs in separate network namespaces), collects
+enriched metrics from both gNBs, stores them durably, serves them through a
+REST API and a live dashboard, and exposes a strict action contract ready to
+be wired into a control pipeline.
 
-This repository is now organized around the current multi-node lab stage:
+Current branch: `feat/multi-gnb-stage`. Design reference: `D1/DesenhoSolução.md`
+(Portuguese). Stage onboarding walkthrough: `STAGE_OVERVIEW.md`.
 
-- `1 Open5GS` core
-- `2 gNBs`
-- `2 UEs`
-- `1` central metrics collector
-- `1` dashboard reading enriched multi-source metrics
+---
 
-The main topology files for this stage are:
+## Topology
 
-- `config/gnb_gnb1_zmq.yaml`
-- `config/gnb_gnb2_zmq.yaml`
-- `config/ue1_zmq.conf.txt`
-- `config/ue2_zmq.conf.txt`
-- `config/metrics_sources.json`
-- `config/subscribers.json`
+```
+          ┌─────────────────────────────┐
+          │  Open5GS core (AMF/SMF/UPF) │
+          │          127.0.0.5          │
+          └──────────────┬──────────────┘
+                         │ NGAP  |  PFCP  |  GTP-U
+         ┌───────────────┴───────────────┐
+         │                               │
+ ┌───────▼───────┐               ┌───────▼───────┐
+ │  srsRAN gnb1  │               │  srsRAN gnb2  │
+ │  PCI=1        │               │  PCI=2        │
+ │  WS :55551    │               │  WS :55552    │
+ └───────┬───────┘               └───────┬───────┘
+         │  ZMQ fake-radio I/Q           │
+ ┌───────▼───────┐               ┌───────▼───────┐
+ │ srsue  (ue1)  │               │ srsue  (ue2)  │
+ │ netns=ue1     │               │ netns=ue2     │
+ └───────────────┘               └───────────────┘
 
-These older files are still kept as single-node reference/debug files, but they are no longer the main path:
-
-- `config/gnb_zmq.yaml`
-- `config/ue_zmq.conf.txt`
-
-## Prerequisites
-
-Before running the stack, make sure the machine has:
-
-- Open5GS installed and running
-- `mongosh` available locally
-- `systemd-run` available locally
-- `srsue` available on `PATH`
-- `gnb` from srsRAN Project available on `PATH`, or exported through `GNB_BIN`
-- a graphical terminal emulator such as `gnome-terminal`, `konsole`, `xterm`, or `x-terminal-emulator` only if you want the fallback `--mode terminals`
-
-If `gnb` is not installed system-wide, export the binary path before launching:
-
-```bash
-export GNB_BIN=/path/to/srsRAN_Project/build/apps/gnb/gnb
+         ws://127.0.0.1:55551 , ws://127.0.0.1:55552
+                         │
+                         ▼
+              ┌──────────────────────────┐
+              │   metrics_collector.py   │
+              │  one worker per source   │
+              │  enrich → dual-write     │
+              └──────────┬───────────────┘
+                         │
+        ┌────────────────┴────────────────┐
+        ▼                                 ▼
+ metrics/gnb_metrics.jsonl     /tmp/pi-leic-metrics.sqlite
+                         │
+                         │   SQLite-first read, JSONL fallback
+                         ▼
+              ┌──────────────────────────┐
+              │      metrics_api.py      │
+              │     MetricsLogReader     │
+              └─────┬───────────────┬────┘
+                    │               │
+        ┌───────────▼─┐           ┌─▼─────────────────────────┐
+        │ dashboard.py│           │   metrics_rest_api.py     │
+        │ Matplotlib  │           │   FastAPI on :8000        │
+        └─────────────┘           │   /metrics  /metrics_prom │
+                                  │   /alerts   /health       │
+                                  │   /query    /actions      │
+                                  └───────────────────────────┘
 ```
 
-## Python Setup
+The entire topology is supervised by `src/launch_stack.sh` (transient systemd
+user units) and verified end-to-end by `src/validate_stage.sh`.
 
-Use one supported Python flow for every local Python tool in this repository:
+---
+
+## Architecture
+
+Three layers, each one derivable from the layer below; each one optional for
+the one above:
+
+| Layer | Role | Files |
+| --- | --- | --- |
+| **Data** | Ingest, enrich, persist | `collector/`, `metrics/*.jsonl`, SQLite |
+| **Processing** | Read, shape, reason about data | `metrics_api.py`, `shared/liveness.py`, `shared/identity.py` |
+| **Interface** | Expose data and actions | `metrics_rest_api.py`, `dashboard.py` |
+
+### Storage tiers
+
+Three layers, each one redundantly derivable from the one above. A failure in
+any single tier degrades the platform; it never takes it down.
+
+* **JSONL** — `metrics/gnb_metrics.jsonl`. Append-only, schema-flexible (the
+  gNB metric families `cells`, `rlc_metrics`, `du`, `du_low` can evolve without
+  migrations because `raw_payload` passes through verbatim). Human-readable
+  with `tail -f` and `jq`. Rotates at `METRICS_ROTATE_MAX_BYTES` (50 MiB),
+  keeps `METRICS_ROTATE_MAX_FILES` (5) archives, and the reader merges archives
+  newest-first on read. This is the **durable log of record**.
+* **SQLite (WAL mode)** — `/tmp/pi-leic-metrics.sqlite`. Derived index with
+  two tables: `metrics_events` (one row per enriched event, fast family and
+  source lookups) and `metrics_cell_entities` (per-UE denormalized rows keyed
+  by `(source_id, collector_timestamp, cell_index, ue_identity)` for cheap
+  time-window queries). Retention is bounded
+  (`METRICS_SQLITE_RETENTION_MAX_ROWS` default 200 000; periodic pruning every
+  500 events). Dual-write has retry + cooldown: the collector never blocks a
+  JSONL write because SQLite is temporarily unhappy.
+* **Audit DB** — `var/pi-leic-api-audit.sqlite` (persistent across reboot,
+  distinct from the ephemeral metrics cache). Holds `api_audit_log` (one row
+  per `/query` and `/actions` response) and `api_alert_state` (alert
+  lifecycle: `first_seen_at`, `last_seen_at`, `cleared_at`, `status`). This is
+  the operator-facing audit trail and never goes through the metrics dual-write
+  pipeline.
+* **Prometheus exposition (`/metrics_prom`)** — a stateless projection of the
+  snapshot cache already used by `/metrics`. Scraped by Prometheus, read by
+  Grafana. See the dedicated section below.
+
+### Why this storage model stays under SC-RIC (do not delete)
+
+The long-term target is integration with the **O-RAN Software Community
+Near-RT RIC** (see `CLAUDE.md → Target direction` for the phased plan). It is
+tempting to assume that once the collector is receiving E2SM-KPM indications
+from the RIC, the local JSONL / SQLite tier is redundant because SC-RIC ships
+its own canonical stores (InfluxDB for time-series, SDL/Redis for shared xApp
+state). That assumption is wrong. Each tier has a job the RIC stores cannot
+absorb:
+
+* **JSONL is transport-agnostic replay.** The `raw_payload` field is the
+  verbatim JSON off the wire — today a srsRAN WebSocket metrics frame,
+  tomorrow a KPM indication serialized as JSON. Because JSONL keeps the
+  original payload, an old metrics file produced under the WebSocket backend
+  still replays cleanly through a future KPM-aware collector. This is how we
+  tune alert rules, reproduce incidents, and regression-test the enrichment
+  pipeline offline without RF.
+* **JSONL is the last-ditch fallback.** `MetricsLogReader` is SQLite-first
+  with JSONL fallback today; in Phase 4 it becomes InfluxDB-first → SQLite →
+  JSONL. If the RIC pod is restarting, if the Prometheus scraper misfires, if
+  a k8s network partition isolates the operator console from the RIC cluster,
+  the REST API, dashboard, launcher health checks, and validator freshness
+  contract all continue to serve from local files. The rApp / agent tier
+  stays available when the RIC tier is not.
+* **SQLite is the query engine next to the reader.** The REST API is a Python
+  process; round-tripping every `/metrics?from=...&to=...` query across the
+  network to InfluxDB would make the operator console latency-bound on the
+  RIC. Keeping SQLite as the local mirror collapses most reads back into
+  microseconds and is how the snapshot cache stays useful.
+* **The audit DB is ours to own.** SC-RIC's SDL is designed for short-lived
+  xApp coordination state, not for operator audit trails. Who approved which
+  `ActionIntent`, when a given alert first fired, when it cleared — those
+  records belong to the platform and must survive RIC upgrades, pod crashes,
+  and cluster migrations. Phase 5 (Control xApp for E2SM-RC) explicitly
+  preserves this: the audit row is written before the xApp is asked to emit
+  a control message.
+* **Phase 4 is additive, not substitutive.** The storage migration adds
+  InfluxDB as a **third backend** in front of SQLite, not as a replacement.
+  The dispatcher remains `primary → local mirror → durable log` so that the
+  operator workflow never strictly depends on the availability of a store
+  that lives inside the RIC cluster.
+
+Deleting the local tier — or skipping it in the name of "we have a RIC
+eventually" — would break: the dashboard, every REST endpoint, the launcher's
+core-readiness gate, the validator's freshness contract, offline replay, the
+rApp decoupling that lets the agent team iterate without standing up SC-RIC,
+and the audit trail that makes `/actions` accountable. Each of those is
+explicitly listed as a hard invariant in `CLAUDE.md`.
+
+### Hard invariants (do not regress)
+
+1. `MetricsLogReader` is SQLite-first with JSONL fallback. Both dashboards and
+   the REST API depend on this preference.
+2. The freshness contract (`shared/liveness.py`) is shared by the launcher,
+   the validator, and the REST API. The shell side (`launch_lib/metrics_contract.sh`)
+   wraps the same Python helpers.
+3. JSONL writes are never skipped because SQLite failed. The collector applies
+   retry + cooldown logic to SQLite only.
+4. UE identity precedence is `ue > rnti > positional`. Dashboard deduplication,
+   REST entity matching, and freshness signatures all depend on this order.
+5. `/metrics_prom` is read-only. It must not mutate `api_alert_state`, because
+   Prometheus scrapes every few seconds and any mutation would corrupt
+   `first_seen_at` / `cleared_at` transitions.
+6. Transient systemd units run rootless. The launcher never uses `sudo` for
+   user-scoped service management.
+
+---
+
+## Requirements
+
+* Linux host with systemd user services available (developed on Ubuntu 22.04+)
+* Open5GS installed, its services reachable on `127.0.0.5`, and `mongosh`
+  available for subscriber provisioning
+* srsRAN Project `gnb` binary on `PATH`, or exported as `GNB_BIN=/path/to/gnb`
+* srsUE on `PATH`
+* Python 3.10 or newer
+* `iperf3` for the end-to-end validator
+* A graphical terminal emulator (`gnome-terminal`, `konsole`, `xterm`) only if
+  you want the legacy `--mode terminals` fan-out
+
+---
+
+## Quick start
 
 ```bash
-cd /path/to/PI-LEIC
+git clone <repo> PI-LEIC
+cd PI-LEIC
 python3 -m venv src/.venv
 source src/.venv/bin/activate
-python -m pip install -r requirements.txt
-```
+pip install -r requirements.txt
 
-After that, run repo Python tools from the same environment:
-
-```bash
-python src/metrics_collector.py
-python src/dashboard.py
-python src/provision_subscribers.py
-```
-
-## Subscriber Provisioning
-
-The versioned subscriber source of truth for this stage is:
-
-- `config/subscribers.json`
-
-Preview the planned Open5GS subscriber changes first:
-
-```bash
-cd /path/to/PI-LEIC
-source src/.venv/bin/activate
-python src/provision_subscribers.py
-```
-
-Apply them when the preview looks correct:
-
-```bash
-cd /path/to/PI-LEIC
-source src/.venv/bin/activate
-python src/provision_subscribers.py --apply
-```
-
-To provision only one subscriber:
-
-```bash
-python src/provision_subscribers.py --apply --only ue2
-```
-
-## Run The Full Stage
-
-The recommended flow for this stage is:
-
-```bash
-cd /path/to/PI-LEIC
-source src/.venv/bin/activate
 python src/provision_subscribers.py --apply
 bash src/launch_stack.sh
 ```
 
-Run the launcher as your regular user (no `sudo` before the command). It
-requests sudo internally only for privileged operations and needs access to
-your systemd user services.
-
-`src/launch_stack.sh` is the main launcher for this stage. It:
-
-- uses supervised mode by default
-- prompts for sudo once up front
-- cleans up stale PI-LEIC gNB, UE, and collector processes from older runs
-- restarts the Open5GS core services
-- launches `gNB1` and `gNB2` via `systemd-run`
-- creates `ue1` and `ue2` namespaces automatically before launching the UEs
-- launches `UE1` and `UE2` via `systemd-run`
-- launches the central metrics collector as a user service
-- launches the metrics REST API as a user service (enabled by default)
-- optionally launches the dashboard
-- waits dynamically for Open5GS core readiness (active units, startup log markers, live socket probes, and active endpoint probes) before starting attach-sensitive components
-- runs readiness checks after the supervised stack has actually started
-- defers UE data-path route checks by default (set `HEALTHCHECK_REQUIRE_UE_DATA_PATH=1` to require tunnel IPv4/default-route readiness during launch)
-- verifies that the required supervised units are actually active before reporting ready
-- fails fast when explicit attach/PDU failure signals are detected in UE/core logs
-- evaluates metrics freshness with configurable `signature`, `sequence`, `age`, or `hybrid` modes (default `hybrid`) to reduce low-traffic false stale failures
-
-The launcher entrypoint now delegates cohesive runtime helpers to:
-
-- `src/launch_lib/root_runtime.sh`
-- `src/launch_lib/journal_helpers.sh`
-- `src/launch_lib/socket_probes.sh`
-- `src/launch_lib/process_management.sh`
-- `src/launch_lib/core_readiness.sh`
-
-When the dashboard is disabled or there is no display, `--status` only reports user
-units that are actually loaded.
-
-The default supervised mode is the recommended path for repeatable runs and automation.
-
-If you want to inspect what it will do without opening terminals:
+In a second terminal:
 
 ```bash
-bash src/launch_stack.sh --dry-run
+curl -s http://127.0.0.1:8000/health  | jq
+curl -s http://127.0.0.1:8000/metrics | jq
+curl -s 'http://127.0.0.1:8000/alerts?status=open' | jq
+curl -s http://127.0.0.1:8000/metrics_prom
 ```
 
-Useful supervised commands:
+Stop cleanly: `bash src/launch_stack.sh --stop`.
+Full validation (needs real Open5GS and srsRAN): `bash src/validate_stage.sh`.
+
+---
+
+## Project layout
+
+```
+config/                      gNB/UE configs, subscribers, metrics source registry
+config/grafana/              importable Grafana dashboard + Prometheus scrape stub
+D1/                          Design document (Portuguese) and UML diagrams
+metrics/                     Runtime JSONL output (gitignored)
+var/                         Persistent runtime state: audit DB, freshness baseline (gitignored)
+src/
+  launch_stack.sh            main launcher
+  validate_stage.sh          end-to-end validator
+  launch_lib/*.sh            shell modules used by the launcher
+  collector/                 metrics ingestion package
+    config.py                env-var globals
+    enrichment.py            event enrichment and contract fields
+    transport.py             WebSocketSourceAdapter (E2SM KPM adapter lands in Phase 1)
+    storage.py               JSONL rotation + SQLite dual-write
+    worker.py                per-source worker thread, watchdog, main()
+  shared/                    cross-cutting utilities
+    identity.py              UE identity precedence (ue > rnti > positional)
+    liveness.py              freshness contract (signature/sequence/age/hybrid)
+    env_utils.py             env var parsing helpers
+  api_models.py              Pydantic request/response models
+  metrics_api.py             SQLite-first reader with JSONL fallback
+  metrics_rest_api.py        FastAPI app (REST + Prometheus scrape)
+  dashboard.py               Matplotlib live dashboard
+  provision_subscribers.py   Open5GS MongoDB upsert
+tests/                       Python unit tests and rootless shell tests
+agent/                       Ollama-backed agent prototype (CLI)
+```
+
+Shim files at `src/env_utils.py`, `src/metrics_identity.py`,
+`src/metrics_liveness.py`, and `src/metrics_collector.py` re-export from
+`src/shared/` and `src/collector/`; do not delete, external callers rely on them.
+
+---
+
+## Running the stack
+
+`src/launch_stack.sh` runs each component as a transient systemd user unit.
+Before starting the gNBs it gates on: required units `active`, core-readiness
+log markers, SMF-to-AMF association, PFCP and GTP-U sockets bound, and active
+endpoint probes. Always run as your regular user, not via `sudo`; the launcher
+escalates only where it must.
 
 ```bash
+bash src/launch_stack.sh                  # supervised (default)
 bash src/launch_stack.sh --status
-bash src/launch_stack.sh --logs collector
-bash src/launch_stack.sh --logs api
-bash src/launch_stack.sh --logs gnb1
+bash src/launch_stack.sh --logs collector # or: api | gnb1 | gnb2 | ue1 | ue2
 bash src/launch_stack.sh --stop
+bash src/launch_stack.sh --dry-run        # print actions, touch nothing
+bash src/launch_stack.sh --mode terminals # legacy GUI-terminal fan-out
 ```
 
-Launcher/API controls:
+`src/validate_stage.sh` provisions subscribers, launches the stack, runs
+concurrent `iperf3` from both UE namespaces, and checks that every configured
+source reports fresh non-zero DL/UL through the shared reader contract. The
+freshness baseline is persisted under `var/freshness_baseline.json`, so a
+crash between baseline capture and validation is recoverable on the next run.
+See `STAGE_OVERVIEW.md` §6 and §12 for the manual single-component flow.
 
-- `API_ENABLED` (default `1`)
-- `API_HOST` (default `0.0.0.0`)
-- `API_PORT` (default `8000`)
-- `METRICS_TRANSPORT_BACKEND` (default `websocket`, accepts `websocket` or `zmq`)
+---
 
-If you still want the older GUI-terminal workflow for manual debugging:
+## REST API
 
-```bash
-bash src/launch_stack.sh --mode terminals
+Base URL `http://127.0.0.1:8000`. JSON responses everywhere except
+`/metrics_prom`, which returns Prometheus text exposition.
+
+| Endpoint | Purpose |
+| --- | --- |
+| `GET /health`        | Liveness, per-source freshness; always reads fresh, bypasses the snapshot cache |
+| `GET /capabilities`  | Feature flags (`llm_integrated`, `action_mutation_pipeline_enabled`, `query_backend_mode`, `action_execution_mode`); transport descriptor (`current` / `target` / `target_platform`); storage, freshness policy, alert ruleset |
+| `GET /metrics`       | Latest snapshot, or a time window with `from` / `to` / `cell_id` / `source_id` filters |
+| `GET /metrics_prom`  | Prometheus gauges per source and per UE; also `alerts_open` counts and `api_uptime_seconds`. Read-only |
+| `GET /alerts?status=open\|all` | Rule-based alerts with provenance (`rule.id`, `rule.parameters`, `rule.evidence`); lifecycle persisted in audit DB |
+| `POST /query`        | Operator question, currently a deterministic stub (`answered_stub`, `llm_not_integrated`) |
+| `POST /actions`      | Strict `ActionIntent` audit-only submission |
+
+Audit storage lives at `var/pi-leic-api-audit.sqlite` by default (persistent
+across reboot):
+
+* `api_audit_log`: one row per `/query` and `/actions` response
+* `api_alert_state`: alert lifecycle (`first_seen_at`, `last_seen_at`, `cleared_at`)
+
+### Action contract
+
+`POST /actions` requires a complete `ActionIntent`. `proposed_value` must
+satisfy `bounds.min_value <= proposed_value <= bounds.max_value`; out-of-bounds
+submissions are rejected by Pydantic at parse time.
+
+```json
+{
+  "request": "reduce cell power by 2 dB",
+  "approve": true,
+  "intent": {
+    "target": "cell:gnb1:0",
+    "parameter": "tx_power_dbm",
+    "unit": "dBm",
+    "proposed_value": 18.0,
+    "current_value": 20.0,
+    "bounds": { "min_value": 10.0, "max_value": 23.0 },
+    "reason": "mitigate observed interference",
+    "safety_checks": ["verify_cell_online"],
+    "dry_run": true
+  }
+}
 ```
 
-## Validation Run
+* `approve=false` → `status=pending_approval`, audit row written.
+* `approve=true`  → `status=approved_not_executed`, audit row written. Runtime
+  parameter mutation is deliberately disabled in this stage.
 
-Use this to replay the full milestone validation against fresh metrics from the current run only:
+### Prometheus and Grafana — what they do here, and why
 
-```bash
-cd /path/to/PI-LEIC
-bash src/validate_stage.sh
+`GET /metrics_prom` exposes the platform's live state in the **Prometheus text
+exposition format**. Prometheus pulls (scrapes) this endpoint on a fixed
+interval, stores each sample as a labelled time series, and serves a query
+language (**PromQL**) over that history. Grafana is a browser-based
+visualization frontend that runs PromQL against Prometheus and renders
+dashboards. Together they replace the desktop-only `dashboard.py` with a
+multi-operator, retention-friendly observability stack.
+
+**Why pull and not push.** The collector's JSONL and SQLite tiers are a
+write-through log + index of individual events. Prometheus is not a log; it is
+a *gauge store* — it samples the current value of each metric at scrape time
+and stores the time series. The two are complementary: JSONL / SQLite answers
+"what happened between 14:03:00 and 14:03:15 on gnb1?", Prometheus answers
+"what is the rolling 1-minute average DL throughput across all UEs on gnb1?".
+Keeping the exporter read-only and stateless is an explicit invariant (see
+`tests/test_metrics_rest_api.py::test_metrics_prom_does_not_mutate_alert_lifecycle`) —
+if scraping mutated the alert lifecycle table, Prometheus' 5-second cadence
+would flood `first_seen_at` / `cleared_at` transitions.
+
+**What the exposition contains** (rendered by
+`_render_prometheus_exposition` in `src/metrics_rest_api.py`):
+
+| Metric | Type | Labels | Meaning |
+| --- | --- | --- | --- |
+| `gnb_source_fresh` | gauge | `source_id` | `1` if the latest sample is within `ALERT_STALE_AFTER_SECONDS`, else `0`. Same rule as the `stale-source` alert. |
+| `gnb_source_last_sample_age_seconds` | gauge | `source_id` | Age in seconds of the most recent sample per source. Drives freshness panels and SLO burn-rate math. |
+| `gnb_source_sequence` | gauge | `source_id` | Monotonic counter of cells-family events per source. Zero increase over a window is a silent source. |
+| `gnb_source_entities` | gauge | `source_id` | Number of UE entities in the most recent snapshot. |
+| `gnb_ue_dl_brate_bps` | gauge | `source_id`, `cell_index`, `pci`, `ue_identity` | Latest downlink bitrate per UE (bits/s). |
+| `gnb_ue_ul_brate_bps` | gauge | `source_id`, `cell_index`, `pci`, `ue_identity` | Latest uplink bitrate per UE (bits/s). |
+| `gnb_ue_throughput_mbps` | gauge | same as above | `(dl_brate + ul_brate) / 1e6`, matching the D1 contract field. |
+| `gnb_ue_pusch_snr_db` | gauge | same as above | Latest PUSCH SNR per UE, when the source reports it. |
+| `gnb_alerts_open` | gauge | `type` | Current open alert count by type (`stale-source`, `low-throughput`), computed from the same snapshot — pure function, no DB mutation. |
+| `gnb_api_uptime_seconds` | gauge | — | Seconds since the REST API process started. |
+
+**Scrape configuration.** A ready-to-copy file lives at
+`config/grafana/prometheus-scrape.yml`:
+
+```yaml
+scrape_configs:
+  - job_name: pi-leic-api
+    metrics_path: /metrics_prom
+    static_configs:
+      - targets: ["127.0.0.1:8000"]
+    scrape_interval: 5s
+    scrape_timeout: 3s
 ```
 
-Run the validator as your regular user (no `sudo` before the command). It
-requests sudo internally only for privileged operations and relies on
-systemd user services for supervised orchestration.
+Drop it under your Prometheus `scrape_configs`, reload Prometheus, and the
+series start flowing. The 5 s cadence deliberately matches
+`METRICS_SNAPSHOT_TTL_SECONDS` default; a faster cadence just pays the I/O
+cost without seeing fresher data.
 
-It will:
+**Grafana dashboard.** `config/grafana/pi-leic-overview.json` is an importable
+dashboard (Grafana → Dashboards → Import → upload JSON). It binds to a
+Prometheus datasource variable (`${DS_PROMETHEUS}`) and a per-source template
+variable (`$source_id`) populated by
+`label_values(gnb_source_fresh, source_id)`. Panels include source freshness
+(stat, STALE=red / FRESH=green), UE entities per source, last-sample age,
+sequence progression, per-UE DL / UL throughput, PUSCH SNR, and open alerts
+by type. All metric references come straight from the exposition table above,
+so the dashboard stays in sync with the exporter as long as metric names
+remain stable.
 
-- apply `config/subscribers.json`
-- launch the full stack
-- send traffic from `ue1` and `ue2` to `10.45.0.1`
-- confirm fresh metrics for every configured source via the shared reader contract (`src/metrics_api.py`, SQLite-first with JSONL fallback)
-- confirm fresh non-zero `dl_brate` and `ul_brate` for all observed UE entities in every configured source
+**How this fits the SC-RIC target.** Prometheus is the de-facto metrics
+surface for O-RAN SMO / FCAPS stacks, and SC-RIC components expose their own
+Prometheus endpoints for operational visibility. Keeping our operator-facing
+dashboard on Prometheus + Grafana means that when Phase 1 boots a FlexRIC
+container and Phase 2 adds the E2SM-KPM adapter, the existing Grafana board
+continues to work unchanged for our metrics, and it can be extended
+side-by-side with panels that scrape the RIC's own Prometheus exporter. No
+dashboard code is throwaway.
 
-Freshness policy controls are available for both launcher readiness and validator checks:
-
-- `FRESHNESS_CHECK_MODE` (default `hybrid`, accepts `signature`, `sequence`, `age`, `hybrid`)
-- `FRESHNESS_AGE_WINDOW_SECONDS` (default `15`)
-- `FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS` (default `2`)
-
-The baseline/signature/sequence/age freshness contract is shared through:
-
-- `src/metrics_liveness.py`
-
-This is the authoritative end-to-end validation flow. By default it launches the stack in supervised mode, enables dynamic core readiness checks before UE attach (including live socket and active endpoint probes), enables strict launch readiness checks for service and metrics health, fails fast on explicit attach/PDU failure signals with categorized cause summaries, disables the dashboard, defers UE data-path checks to this script, waits for each UE namespace to gain a usable route, and validates after real traffic has been generated. If a stale manual run is still holding ZMQ or NG-U ports, the launcher now cleans up the old PI-LEIC lab processes before starting the supervised units.
-
-If you already have part of the stack running, you can skip steps:
-
-```bash
-bash src/validate_stage.sh --skip-provision --skip-launch
-```
-
-## Metrics REST API
-
-The network team now also provides a REST interface aligned with the D1 endpoint
-shape for integration and operator workflows:
+### Dashboard (Matplotlib, deprecated)
 
 ```bash
-cd /path/to/PI-LEIC
-source src/.venv/bin/activate
-uvicorn src.metrics_rest_api:app --host 0.0.0.0 --port 8000
-```
-
-Implemented endpoints:
-
-- `GET /metrics?cell_id=&from=&to=`
-- `GET /alerts?status=open`
-- `GET /health`
-- `GET /capabilities`
-- `POST /query`
-- `POST /actions`
-
-`GET /metrics` behavior:
-
-- without `from`/`to`: returns the latest per-source snapshot
-- with `from` and/or `to`: returns matching events in that time window
-- includes `transport` metadata (`ingestion`, `d1_target`, `parity`) so clients can
-	detect that ingestion currently runs over WebSocket while D1 target transport is ZMQ
-
-`GET /alerts` behavior:
-
-- rule-based alerts with explicit provenance per item (`rule.id`, `rule.parameters`, `rule.evidence`)
-- current ruleset is threshold-based (`mode=rule-thresholds`), not ML-based anomaly detection
-
-`POST /query` behavior:
-
-- deterministic network-scope stub response (`status=answered_stub`, `reason_code=llm_not_integrated`)
-- includes stable `request_id`, `capabilities`, and `transport` metadata for audit/integration
-
-`POST /actions` behavior:
-
-- `approve=false` returns `status=pending_approval`
-- `approve=true` returns `status=approved_not_executed`
-- requires strict `intent` payload (`target`, `parameter`, `unit`, `proposed_value`, `bounds`, `reason`, `safety_checks`, `dry_run`)
-- current execution mode is `audit-only-stub`; approved requests are persisted but runtime
-	parameter mutation is intentionally disabled in this milestone
-
-REST API audit controls:
-
-- `API_AUDIT_DB_ENABLED` (default `1`)
-- `API_AUDIT_DB_PATH` (default `/tmp/pi-leic-api-audit.sqlite`)
-- `API_AUDIT_DB_TIMEOUT_SECONDS` (default `5`)
-
-REST/API behavior controls:
-
-- `QUERY_BACKEND_MODE` (default `heuristic-stub`)
-- `ALERT_RULESET_VERSION` (default `rules-v1`)
-- `METRICS_INGESTION_TRANSPORT` (default `websocket`)
-- `D1_TARGET_TRANSPORT` (default `zmq`)
-
-Current D1 deferred items (network scope):
-
-- full LLM-backed query/action interpretation
-- live runtime execution pipeline for approved actions
-- strict ZMQ ingestion parity (current ingestion remains WebSocket for this stage)
-
-## Manual Run
-
-Use this when debugging one component at a time.
-
-1. Provision the subscribers:
-
-```bash
-cd /path/to/PI-LEIC
-source src/.venv/bin/activate
-python src/provision_subscribers.py --apply
-```
-
-2. Start the core log terminal:
-
-```bash
-sudo tail -f /var/log/open5gs/amf.log
-```
-
-3. Start `gNB1`:
-
-```bash
-cd /path/to/PI-LEIC
-sudo "${GNB_BIN:-gnb}" -c config/gnb_gnb1_zmq.yaml
-```
-
-4. Start `gNB2`:
-
-```bash
-cd /path/to/PI-LEIC
-sudo "${GNB_BIN:-gnb}" -c config/gnb_gnb2_zmq.yaml
-```
-
-5. Create the UE namespaces:
-
-```bash
-sudo ip netns del ue1 2>/dev/null
-sudo ip netns add ue1
-sudo ip netns del ue2 2>/dev/null
-sudo ip netns add ue2
-```
-
-6. Start `UE1`:
-
-```bash
-cd /path/to/PI-LEIC
-sudo srsue config/ue1_zmq.conf.txt
-```
-
-7. Start `UE2`:
-
-```bash
-cd /path/to/PI-LEIC
-sudo srsue config/ue2_zmq.conf.txt
-```
-
-8. Start the central metrics collector:
-
-```bash
-cd /path/to/PI-LEIC
-source src/.venv/bin/activate
-export METRICS_SOURCES_CONFIG=config/metrics_sources.json
-export METRICS_OUT=metrics/gnb_metrics.jsonl
-python src/metrics_collector.py
-```
-
-9. Start the dashboard:
-
-```bash
-cd /path/to/PI-LEIC
-source src/.venv/bin/activate
-export METRICS_OUT=metrics/gnb_metrics.jsonl
-export MPLCONFIGDIR=/tmp/pi-leic-matplotlib
 python src/dashboard.py
 ```
 
-## Metrics Output
+Local window showing a 50-sample rolling history per `(source_id, ue_identity)`
+pair. Retained only as a dev-time live view while the Grafana dashboard matures
+to cover the same demo flow — see the DEPRECATED note at the top of
+`src/dashboard.py`. Do not add new panels or features here; build them in
+Grafana instead. Headless operation is not supported.
 
-The current multi-node flow writes enriched JSONL metrics to:
+---
 
-- `metrics/gnb_metrics.jsonl`
+## Data contract
 
-The collector source list is defined in:
+### Enriched event
 
-- `config/metrics_sources.json`
+Each line in `metrics/gnb_metrics.jsonl` (and each row in `metrics_events`) is:
 
-The internal metrics access layer used by the dashboard is:
-
-- `src/metrics_api.py`
-
-The collector now supports built-in JSONL rotation/retention with environment variables:
-
-- `METRICS_ROTATE_MAX_BYTES` (default `52428800`, 50 MiB)
-- `METRICS_ROTATE_MAX_FILES` (default `5`)
-
-The collector also supports a SQLite cache path used by dashboards and fast API
-queries:
-
-- `METRICS_SQLITE_ENABLED` (default `1`)
-- `METRICS_SQLITE_PATH` (default `/tmp/pi-leic-metrics.sqlite`)
-- `METRICS_SQLITE_TIMEOUT_SECONDS` (default `5`)
-- `METRICS_SQLITE_RETRY_MAX_FAILURES` (default `5`)
-- `METRICS_SQLITE_RETRY_COOLDOWN_SECONDS` (default `10`)
-- `METRICS_SQLITE_RETENTION_MAX_AGE_DAYS` (default `0`, disabled)
-- `METRICS_SQLITE_RETENTION_MAX_ROWS` (default `200000`)
-- `METRICS_SQLITE_RETENTION_INTERVAL_EVENTS` (default `500`)
-- `METRICS_SQLITE_RETENTION_VACUUM` (default `0`)
-
-Collector transport selection:
-
-- `METRICS_TRANSPORT_BACKEND` (default `websocket`, accepts `websocket` or `zmq`)
-
-WebSocket keepalive controls for metrics source connectivity:
-
-- `METRICS_WS_PING_INTERVAL_SECONDS` (default `15`, set `0` to disable)
-- `METRICS_WS_PING_TIMEOUT_SECONDS` (default `5`)
-
-Collector event contract metadata:
-
-- `schema_version` (default `1.0`, override with `METRICS_SCHEMA_VERSION`)
-- `event_type` (`metric`, `alarm`, or `state`; defaults inferred from payload family)
-
-If SQLite writes fail transiently (for example temporary lock/contention),
-the collector keeps writing JSONL and retries SQLite after a cooldown window.
-It no longer permanently disables SQLite on the first write error.
-
-When rotation is enabled, older files are kept as:
-
-- `metrics/gnb_metrics.jsonl.1`
-- `metrics/gnb_metrics.jsonl.2`
-- etc., up to `METRICS_ROTATE_MAX_FILES`
-
-By default, the dashboard/API path prefers the SQLite cache through
-`src/metrics_api.py`, and falls back to JSONL scanning if SQLite is unavailable.
-For JSONL fallback control:
-
-- `METRICS_LOG_INCLUDE_ROTATED` (default `1`)
-- `METRICS_LOG_MAX_ARCHIVES` (default `5`)
-
-`MetricsLogReader.latest_cells_by_source()` now returns all observed UE entities from
-all cells in the latest event per source, each with:
-
-- `cell_index`
-- `ue_index`
-- `ue_identity` (derived from `ue`, then `rnti`, then positional fallback)
-- `ue` (the UE metrics payload)
-- optional `pci`
-
-For `cells` events, top-level UE context fields (`ue`, `rnti`, `cell_index`,
-`pci`) should not be treated as authoritative. Use entity lists or
-`raw_payload.cells[*].ue_list[*]` as source of truth.
-
-To confirm the metrics file is growing:
-
-```bash
-watch -n 1 'wc -l metrics/gnb_metrics.jsonl'
+```jsonc
+{
+  "collector_timestamp": "2026-04-16T14:03:22.117Z",
+  "source_id":          "gnb1",
+  "gnb_id":             "gnb1",
+  "source_endpoint":    "ws://127.0.0.1:55551",
+  "metric_family":      "cells",         // cells | rlc_metrics | du_low | du | unknown
+  "event_type":         "metric",        // metric | alarm | state
+  "schema_version":     "1.0",
+  "timestamp":          1713268999.412,
+  "raw_payload":        { /* verbatim gNB JSON */ },
+  "cell_id":            1,
+  "ue_id":              "rnti:4601",
+  "throughput_mbps":    12.8754,
+  "bler_pct":           0.42
+}
 ```
 
-To test UE connectivity after attach:
+`prb_usage_pct`, `latency_ms`, and `rsrp_dbm` are not populated yet because
+srsRAN's WebSocket metrics JSON does not expose them directly. See
+`STAGE_OVERVIEW.md` Gap 2 for the tracked follow-up.
+
+### UE identity precedence (hard invariant)
+
+`shared.identity.extract_cell_ue_entities()` resolves a stable `ue_identity`
+in this order:
+
+1. `ue.ue` (operator-assigned label)
+2. `ue.rnti` (formatted `rnti:<value>`)
+3. positional fallback `cell{i}-ue{j}`
+
+### Freshness modes
+
+| Mode | Fresh when |
+| --- | --- |
+| `signature` | JSON-normalized entity snapshot differs from the baseline |
+| `sequence`  | Sequence counter advanced past the baseline |
+| `age`       | Sample timestamp is within `FRESHNESS_AGE_WINDOW_SECONDS` of now |
+| `hybrid`    | Any of the above (default) |
+
+---
+
+## Configuration reference
+
+Only the knobs you are most likely to change. `STAGE_OVERVIEW.md` §4 has the
+complete list.
+
+### Freshness
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `FRESHNESS_CHECK_MODE` | `hybrid` | `signature`, `sequence`, `age`, or `hybrid` |
+| `FRESHNESS_AGE_WINDOW_SECONDS` | `15` | Upper bound on acceptable sample age |
+| `FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS` | `2` | Host clock drift tolerance |
+| `FRESHNESS_BASELINE_PATH` | `var/freshness_baseline.json` | Persistent validator baseline |
+
+### Collector
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `METRICS_SOURCES_CONFIG` | `config/metrics_sources.json` | Source registry path |
+| `METRICS_OUT` | `metrics/gnb_metrics.jsonl` | JSONL output path |
+| `METRICS_ROTATE_MAX_BYTES` | `52428800` (50 MiB) | Rotate at this size |
+| `METRICS_ROTATE_MAX_FILES` | `5` | Archive files kept |
+| `METRICS_SQLITE_ENABLED` | `1` | Toggle SQLite dual-write |
+| `METRICS_SQLITE_PATH` | `/tmp/pi-leic-metrics.sqlite` | SQLite WAL path |
+| `METRICS_SQLITE_RETRY_MAX_FAILURES` | `5` | Consecutive failures before cooldown |
+| `METRICS_SQLITE_RETRY_COOLDOWN_SECONDS` | `10` | Cooldown on sustained failures |
+| `METRICS_SQLITE_RETENTION_MAX_ROWS` | `200000` | Prune oldest rows beyond this count |
+| `METRICS_WS_PING_INTERVAL_SECONDS` | `15` | Set `0` to disable WebSocket keepalive |
+
+### REST API and alerts
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `API_HOST` | `0.0.0.0` | Bind address |
+| `API_PORT` | `8000` | Listen port |
+| `API_AUDIT_DB_ENABLED` | `1` | Persist `/query` and `/actions` audit events |
+| `API_AUDIT_DB_PATH` | `var/pi-leic-api-audit.sqlite` | Audit DB path (persistent) |
+| `ALERT_STALE_AFTER_SECONDS` | `30` (capped at 300) | Threshold for `stale-source` |
+| `ALERT_MIN_DL_BRATE` | `-1.0` (disabled) | Fire `low-throughput` when DL at or below this |
+| `ALERT_MIN_UL_BRATE` | `-1.0` (disabled) | Fire `low-throughput` when UL at or below this |
+| `ALERT_RULESET_VERSION` | `rules-v1` | Ruleset identifier advertised by `/capabilities` |
+| `QUERY_BACKEND_MODE` | `heuristic-stub` | `heuristic-stub` → `llm-local` → `llm-hosted` |
+| `METRICS_SNAPSHOT_TTL_SECONDS` | `5` (capped at 60) | Snapshot cache TTL for `/metrics` and `/alerts` |
+
+### Launcher
+
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `API_ENABLED` | `1` | Start the REST API user service |
+| `DASHBOARD_ENABLED` | `0` | Start `dashboard.py` |
+| `HEALTHCHECK_STRICT` | `0` | Fail-fast on any post-launch health check miss |
+| `CORE_READINESS_TIMEOUT_SECONDS` | `45` | Upper bound on core-readiness wait |
+| `UNIT_PREFIX` | `pi-leic` | systemd transient unit prefix |
+| `DRY_RUN` | `0` | Print actions without executing privileged commands |
+
+---
+
+## Tests and CI
+
+Python (85 unit tests covering collector, readers, liveness, identity, REST
+API, and dashboard dedup):
 
 ```bash
-sudo ip netns exec ue1 ping 10.45.0.1
-sudo ip netns exec ue2 ping 10.45.0.1
-```
-
-## Tests And CI
-
-Run local unit tests with:
-
-```bash
+source src/.venv/bin/activate
 python -m unittest discover -s tests -p "test_*.py" -v
 ```
 
-The repository now includes a minimal CI workflow in `.github/workflows/ci.yml` that runs:
-
-- shell syntax checks for launcher/validator scripts
-- rootless shell behavior checks for launcher modules under `src/launch_lib/`
-- Python syntax checks for key scripts
-- unit tests under `tests/`
-
-## Useful Commands
-
-Restart the core services:
+Shell (rootless, no `sudo`):
 
 ```bash
-sudo systemctl restart open5gs-amfd open5gs-smfd open5gs-upfd
+for t in tests/test_launch_lib_*.sh \
+         tests/test_launch_stack_dry_run_rootless.sh \
+         tests/test_validate_stage_rootless.sh; do
+  bash "$t"
+done
 ```
 
-Enable the Open5GS WebUI if you want a GUI fallback for manual inspection:
+Syntax-only:
 
 ```bash
-sudo systemctl enable open5gs-webui
-sudo systemctl start open5gs-webui
+bash -n src/launch_stack.sh
+bash -n src/validate_stage.sh
 ```
 
-Default WebUI credentials:
+CI (`.github/workflows/ci.yml`) has three jobs on every push:
 
-- username: `admin`
-- password: `1423`
+1. **test**: shell syntax, rootless shell behavior tests, Python syntax,
+   `ruff check` (E, F), and the full unit test suite.
+2. **api_smoke**: boots the REST API against a synthetic JSONL fixture, hits
+   `/metrics`, `/alerts`, `/metrics_prom`, and verifies that repeated
+   Prometheus scrapes do not mutate the alert lifecycle.
+
+The full end-to-end validator (`validate_stage.sh`) needs real Open5GS and
+srsRAN on the host and is therefore not run in CI.

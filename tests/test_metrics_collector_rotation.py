@@ -20,7 +20,6 @@ from collector.enrichment import enrich_event  # noqa: E402
 from collector.storage import EventWriter, SQLiteEventSink  # noqa: E402
 from collector.transport import (  # noqa: E402
     WebSocketSourceAdapter,
-    ZmqSourceAdapter,
     build_transport_adapter,
     websocket_keepalive_kwargs,
 )
@@ -257,22 +256,6 @@ class EventWriterRotationTests(unittest.TestCase):
 
         self.assertEqual(event["event_type"], "alarm")
 
-    def test_enrich_event_accepts_source_without_ws_url(self):
-        source = {
-            "source_id": "gnb1",
-            "gnb_id": "gnb-1",
-            "zmq_endpoint": "tcp://127.0.0.1:55555",
-        }
-        payload = {
-            "timestamp": "2026-04-14T10:00:00+00:00",
-            "du": {},
-        }
-
-        event = enrich_event(source, payload)
-
-        self.assertEqual(event["source_id"], "gnb1")
-        self.assertEqual(event["source_endpoint"], "tcp://127.0.0.1:55555")
-
     def test_websocket_keepalive_kwargs_enabled_by_default(self):
         kwargs = websocket_keepalive_kwargs()
 
@@ -281,25 +264,15 @@ class EventWriterRotationTests(unittest.TestCase):
         self.assertIn("ping_timeout", kwargs)
         self.assertGreaterEqual(kwargs["ping_timeout"], 0)
 
-    def test_transport_adapter_factory_defaults_to_websocket(self):
+    def test_transport_adapter_factory_returns_websocket_adapter(self):
         source = {
             "source_id": "gnb1",
             "gnb_id": "gnb1",
             "ws_url": "ws://127.0.0.1:55551",
         }
 
-        adapter = build_transport_adapter(source, backend="websocket")
+        adapter = build_transport_adapter(source)
         self.assertIsInstance(adapter, WebSocketSourceAdapter)
-
-    def test_transport_adapter_factory_can_build_zmq_placeholder(self):
-        source = {
-            "source_id": "gnb1",
-            "gnb_id": "gnb1",
-            "zmq_endpoint": "tcp://127.0.0.1:55555",
-        }
-
-        adapter = build_transport_adapter(source, backend="zmq")
-        self.assertIsInstance(adapter, ZmqSourceAdapter)
 
     def test_sqlite_sink_migrates_old_schema_on_open(self):
         """SQLiteEventSink must open a DB created without event_type/source_endpoint and write to it."""

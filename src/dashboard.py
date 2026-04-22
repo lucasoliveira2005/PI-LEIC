@@ -1,4 +1,11 @@
 #!/usr/bin/env python3
+"""DEPRECATED — kept only as a dev-time live view.
+
+Grafana (see `config/grafana/`) is the canonical visualization surface going
+forward. Do not add new views, panels, or features here; build them in
+Grafana instead. This module will be removed once the Grafana dashboard
+fully covers the demo flow.
+"""
 import json
 import os
 import sys

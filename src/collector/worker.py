@@ -21,7 +21,6 @@ from .config import (
     METRICS_SQLITE_RETRY_COOLDOWN_SECONDS,
     METRICS_SQLITE_RETRY_MAX_FAILURES,
     METRICS_SQLITE_TIMEOUT_SECONDS,
-    METRICS_TRANSPORT_BACKEND,
     METRICS_WS_PING_INTERVAL_SECONDS,
     METRICS_WS_PING_TIMEOUT_SECONDS,
     OUT,
@@ -65,14 +64,11 @@ class MetricsSourceWorker:
 
     def on_open(self, ws: Any) -> None:
         print(
-            f"[{self.source['source_id']}] Connected to {source_endpoint(self.source)} "
-            f"via {METRICS_TRANSPORT_BACKEND}",
+            f"[{self.source['source_id']}] Connected to {source_endpoint(self.source)} via websocket",
             flush=True,
         )
-
-        if METRICS_TRANSPORT_BACKEND == "websocket":
-            ws.send(json.dumps({"cmd": "metrics_subscribe"}))
-            print(f"[{self.source['source_id']}] Subscribed to metrics", flush=True)
+        ws.send(json.dumps({"cmd": "metrics_subscribe"}))
+        print(f"[{self.source['source_id']}] Subscribed to metrics", flush=True)
 
     def on_message(self, _ws: Any, message: str) -> None:
         try:
@@ -194,12 +190,6 @@ def _watchdog_loop(workers: List[MetricsSourceWorker], stop_event: threading.Eve
 
 
 def main() -> None:
-    if METRICS_TRANSPORT_BACKEND == "zmq":
-        raise RuntimeError(
-            "ZMQ transport is not yet implemented. "
-            "Set METRICS_TRANSPORT_BACKEND=websocket (the default)."
-        )
-
     sources = load_sources()
     OUT.parent.mkdir(parents=True, exist_ok=True)
     writer = EventWriter(
@@ -243,15 +233,15 @@ def main() -> None:
     else:
         print("SQLite cache disabled for metrics output.", flush=True)
 
-    print(f"Transport backend: METRICS_TRANSPORT_BACKEND={METRICS_TRANSPORT_BACKEND}", flush=True)
+    print("Transport: websocket (srsRAN JSON metrics server)", flush=True)
 
-    if METRICS_TRANSPORT_BACKEND == "websocket" and METRICS_WS_PING_INTERVAL_SECONDS > 0:
+    if METRICS_WS_PING_INTERVAL_SECONDS > 0:
         print(
             f"WebSocket keepalive enabled: ping_interval={METRICS_WS_PING_INTERVAL_SECONDS}s, "
             f"ping_timeout={METRICS_WS_PING_TIMEOUT_SECONDS}s",
             flush=True,
         )
-    elif METRICS_TRANSPORT_BACKEND == "websocket":
+    else:
         print("WebSocket keepalive disabled.", flush=True)
 
     stop_event = threading.Event()

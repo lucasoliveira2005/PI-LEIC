@@ -130,9 +130,9 @@ class MetricsRestApiTests(unittest.TestCase):
 
         payload = response.json()
         self.assertEqual(payload["mode"], "latest-snapshot")
-        self.assertEqual(payload["transport"]["ingestion"], "websocket")
-        self.assertEqual(payload["transport"]["d1_target"], "zmq")
-        self.assertEqual(payload["transport"]["parity"], "deferred")
+        self.assertEqual(payload["transport"]["current"], "websocket")
+        self.assertEqual(payload["transport"]["target"], "e2ap-kpm")
+        self.assertEqual(payload["transport"]["target_platform"], "o-ran-sc-ric")
         self.assertEqual(payload["count"], 2)
 
     def test_get_metrics_with_time_window_returns_event_window(self):
@@ -156,7 +156,8 @@ class MetricsRestApiTests(unittest.TestCase):
 
         payload = response.json()
         self.assertEqual(payload["mode"], "time-window")
-        self.assertEqual(payload["transport"]["parity"], "deferred")
+        self.assertEqual(payload["transport"]["current"], "websocket")
+        self.assertEqual(payload["transport"]["target"], "e2ap-kpm")
         self.assertEqual(payload["count"], 2)
 
     def test_get_alerts_reports_stale_sources(self):
@@ -344,6 +345,63 @@ class MetricsRestApiTests(unittest.TestCase):
         payload = response.json()
         self.assertEqual(payload["count"], 1)
         self.assertEqual(payload["items"][0]["source_id"], "gnb1")
+
+    def test_metrics_prom_exposes_gauges_per_source_and_ue(self):
+        now = datetime.now(timezone.utc).isoformat()
+        self._write_events(
+            [
+                self._cells_event("gnb1", now, dl_brate=1000.0, ul_brate=500.0, pci=1, ue="ue1"),
+                self._cells_event("gnb2", now, dl_brate=2000.0, ul_brate=1000.0, pci=2, ue="ue2"),
+            ]
+        )
+
+        response = self.client.get("/metrics_prom")
+        self.assertEqual(response.status_code, 200)
+        content_type = response.headers.get("content-type", "")
+        self.assertTrue(content_type.startswith("text/plain"))
+        self.assertIn("version=0.0.4", content_type)
+
+        body = response.text
+        self.assertIn("# HELP gnb_source_fresh", body)
+        self.assertIn("# TYPE gnb_source_fresh gauge", body)
+        self.assertIn('gnb_source_fresh{source_id="gnb1"} 1.0', body)
+        self.assertIn('gnb_source_fresh{source_id="gnb2"} 1.0', body)
+
+        self.assertIn("# HELP gnb_ue_dl_brate_bps", body)
+        self.assertIn('source_id="gnb1"', body)
+        self.assertIn('ue_identity="ue:ue1"', body)
+        self.assertIn('pci="1"', body)
+        self.assertIn("gnb_ue_throughput_mbps", body)
+
+    def test_metrics_prom_reports_stale_alert_when_sample_is_old(self):
+        stale_ts = "2020-01-01T00:00:00+00:00"
+        self._write_events([self._cells_event("gnb1", stale_ts)])
+
+        response = self.client.get("/metrics_prom")
+        self.assertEqual(response.status_code, 200)
+
+        body = response.text
+        self.assertIn('gnb_source_fresh{source_id="gnb1"} 0.0', body)
+        self.assertIn('gnb_alerts_open{type="stale-source"} 1.0', body)
+
+    def test_metrics_prom_does_not_mutate_alert_lifecycle(self):
+        # Prometheus scrapes should be read-only: they must not create or
+        # transition rows in api_alert_state (which would corrupt first_seen_at
+        # and cleared_at under a real scrape cadence).
+        stale_ts = "2020-01-01T00:00:00+00:00"
+        self._write_events([self._cells_event("gnb1", stale_ts)])
+
+        with sqlite3.connect(str(metrics_rest_api.AUDIT_DB_PATH)) as conn:
+            before = conn.execute("SELECT COUNT(*) FROM api_alert_state").fetchone()[0]
+
+        for _ in range(3):
+            response = self.client.get("/metrics_prom")
+            self.assertEqual(response.status_code, 200)
+
+        with sqlite3.connect(str(metrics_rest_api.AUDIT_DB_PATH)) as conn:
+            after = conn.execute("SELECT COUNT(*) FROM api_alert_state").fetchone()[0]
+
+        self.assertEqual(before, after)
 
 
 if __name__ == "__main__":

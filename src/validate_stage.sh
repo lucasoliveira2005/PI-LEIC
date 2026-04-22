@@ -14,6 +14,10 @@ METRICS_SQLITE_PATH="${METRICS_SQLITE_PATH:-/tmp/pi-leic-metrics.sqlite}"
 FRESHNESS_CHECK_MODE="${FRESHNESS_CHECK_MODE:-hybrid}"
 FRESHNESS_AGE_WINDOW_SECONDS="${FRESHNESS_AGE_WINDOW_SECONDS:-15}"
 FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS="${FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS:-2}"
+# Persist the validator freshness baseline under var/ so a crash between
+# "baseline captured" and "validate_metrics" does not force a full rerun.
+# Override with FRESHNESS_BASELINE_PATH for custom locations (CI, ephemeral runs).
+FRESHNESS_BASELINE_PATH="${FRESHNESS_BASELINE_PATH:-$REPO_ROOT/var/freshness_baseline.json}"
 TRAFFIC_TARGET="${TRAFFIC_TARGET:-10.45.0.1}"
 IPERF_DURATION_SECONDS="${IPERF_DURATION_SECONDS:-5}"
 IPERF_PORT="${IPERF_PORT:-5201}"
@@ -70,7 +74,7 @@ Environment overrides:
   METRICS_LOG_INCLUDE_ROTATED, METRICS_LOG_MAX_ARCHIVES
   METRICS_SQLITE_ENABLED, METRICS_SQLITE_PATH
   FRESHNESS_CHECK_MODE, FRESHNESS_AGE_WINDOW_SECONDS
-  FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS
+  FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS, FRESHNESS_BASELINE_PATH
   TRAFFIC_SETTLE_SECONDS, NET_READY_TIMEOUT_SECONDS, NET_READY_POLL_SECONDS
   UE_NAMESPACES, LAUNCH_MODE, LAUNCH_DASHBOARD_ENABLED
   LAUNCH_HEALTHCHECK_ENABLED, LAUNCH_HEALTHCHECK_STRICT
@@ -522,8 +526,11 @@ require_sudo_session
 
 cd "$REPO_ROOT"
 
-BASELINE_SIGNATURES_FILE="$(mktemp)"
-trap 'stop_iperf_servers; rm -f "$BASELINE_SIGNATURES_FILE"' EXIT
+mkdir -p "$(dirname "$FRESHNESS_BASELINE_PATH")"
+BASELINE_SIGNATURES_FILE="$FRESHNESS_BASELINE_PATH"
+# Baseline is intentionally persistent (no rm-on-exit) so a crash between
+# baseline capture and metrics validation can be recovered from on the next run.
+trap 'stop_iperf_servers' EXIT
 
 IFS=':' read -r -a UE_NAMESPACES <<< "$UE_NAMESPACES_RAW"
 mapfile -t REQUIRED_SOURCES < <(load_required_sources)
