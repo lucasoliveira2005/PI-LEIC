@@ -6,13 +6,6 @@ import types
 import unittest
 from pathlib import Path
 
-REPO_ROOT = Path(__file__).resolve().parents[1]
-SRC_DIR = REPO_ROOT / "src"
-
-# Add src/ to sys.path so the collector package and its dependencies resolve.
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
 # Stub out the websocket module before the collector package imports it.
 sys.modules.setdefault("websocket", types.SimpleNamespace(WebSocketApp=object))
 

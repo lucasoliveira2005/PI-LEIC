@@ -59,3 +59,9 @@ class ActionRequest(BaseModel):
         None,
         description="Structured action intent. Required when approve=True.",
     )
+
+    @model_validator(mode="after")
+    def _require_intent_when_approved(self) -> "ActionRequest":
+        if self.approve and self.intent is None:
+            raise ValueError("intent is required when approve=True")
+        return self

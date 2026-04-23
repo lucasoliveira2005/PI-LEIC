@@ -4,7 +4,7 @@ import tempfile
 import unittest
 from pathlib import Path
 
-from src.metrics_api import MetricsLogReader, parse_timestamp_to_epoch
+from metrics_api import MetricsLogReader, parse_timestamp_to_epoch
 
 
 class MetricsApiTests(unittest.TestCase):

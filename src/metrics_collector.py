@@ -9,14 +9,7 @@ The real implementation lives in:
   src/collector/worker.py      — source worker threads, watchdog, main()
 """
 
-import sys
-from pathlib import Path
-
-_SCRIPT_DIR = Path(__file__).resolve().parent
-if str(_SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(_SCRIPT_DIR))
-
-from collector import (  # noqa: E402, F401
+from collector import (  # noqa: F401
     METRICS_SCHEMA_VERSION,
     METRICS_SILENCE_THRESHOLD_SECONDS,
     METRICS_SQLITE_ENABLED,

@@ -1,13 +1,7 @@
 import os
-import sys
 import unittest
-from pathlib import Path
 
-SRC_DIR = Path(__file__).resolve().parents[1] / "src"
-if str(SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(SRC_DIR))
-
-from shared.env_utils import (  # noqa: E402
+from shared.env_utils import (
     parse_bool_env,
     parse_float_env,
     parse_non_negative_float_env,

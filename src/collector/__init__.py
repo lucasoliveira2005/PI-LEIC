@@ -1,13 +1,6 @@
 """Metrics collector package — data-ingestion layer for the PI-LEIC platform."""
 
-import sys
-from pathlib import Path
-
-_SRC_DIR = Path(__file__).resolve().parent.parent  # src/collector/ → src/
-if str(_SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(_SRC_DIR))
-
-from .config import (  # noqa: E402, F401
+from .config import (  # noqa: F401
     METRICS_SCHEMA_VERSION,
     METRICS_SILENCE_THRESHOLD_SECONDS,
     METRICS_SQLITE_ENABLED,
@@ -27,7 +20,7 @@ from .config import (  # noqa: E402, F401
     ROTATE_MAX_FILES,
     SOURCES_CONFIG,
 )
-from .enrichment import (  # noqa: E402, F401
+from .enrichment import (  # noqa: F401
     classify_event_type,
     enrich_event,
     extract_contract_fields,
@@ -38,11 +31,11 @@ from .enrichment import (  # noqa: E402, F401
     source_endpoint,
     summarize_event,
 )
-from .storage import EventWriter, SQLiteEventSink  # noqa: E402, F401
-from .transport import (  # noqa: E402, F401
+from .storage import EventWriter, SQLiteEventSink  # noqa: F401
+from .transport import (  # noqa: F401
     SourceTransportAdapter,
     WebSocketSourceAdapter,
     build_transport_adapter,
     websocket_keepalive_kwargs,
 )
-from .worker import MetricsSourceWorker, _watchdog_loop, main  # noqa: E402, F401
+from .worker import MetricsSourceWorker, _watchdog_loop, main  # noqa: F401

@@ -11,6 +11,10 @@ from pathlib import Path
 from typing import Any, Optional
 
 from shared.identity import extract_cell_ue_entities
+from shared.structured_logging import emit_structured_log
+
+
+_LOG_SERVICE = "metrics_collector"
 
 
 class SQLiteEventSink:
@@ -198,7 +202,13 @@ class SQLiteEventSink:
 
         deleted_rows = self._apply_retention_policies()
         if deleted_rows > 0:
-            print(f"SQLite retention pruned {deleted_rows} event row(s).", flush=True)
+            emit_structured_log(
+                "sqlite.retention_pruned",
+                f"SQLite retention pruned {deleted_rows} event row(s).",
+                service=_LOG_SERVICE,
+                deleted_rows=deleted_rows,
+                sqlite_path=self.db_path,
+            )
 
     def _apply_retention_policies(self) -> int:
         if self.retention_max_age_days <= 0 and self.retention_max_rows <= 0:
@@ -288,10 +298,15 @@ class EventWriter:
 
     def _log_sqlite_failure_threshold(self) -> None:
         if self.sqlite_consecutive_failures == self.sqlite_retry_max_failures:
-            print(
+            emit_structured_log(
+                "sqlite.failure_threshold_reached",
                 "SQLite failure threshold reached; continuing JSONL writes while "
                 "periodically retrying SQLite.",
-                flush=True,
+                level="warning",
+                service=_LOG_SERVICE,
+                sqlite_path=self.sqlite_path,
+                consecutive_failures=self.sqlite_consecutive_failures,
+                retry_max_failures=self.sqlite_retry_max_failures,
             )
 
     def _attempt_sqlite_connect(self, log_on_failure: bool) -> bool:
@@ -308,10 +323,13 @@ class EventWriter:
                 retention_vacuum=self.sqlite_retention_vacuum,
             )
             if self.sqlite_consecutive_failures > 0:
-                print(
+                emit_structured_log(
+                    "sqlite.recovered",
                     f"SQLite sink recovered after {self.sqlite_consecutive_failures} "
                     "consecutive failure(s).",
-                    flush=True,
+                    service=_LOG_SERVICE,
+                    sqlite_path=self.sqlite_path,
+                    consecutive_failures=self.sqlite_consecutive_failures,
                 )
             self.sqlite_consecutive_failures = 0
             self.sqlite_next_retry_monotonic = 0.0
@@ -324,12 +342,19 @@ class EventWriter:
             )
 
             if log_on_failure:
-                print(
+                emit_structured_log(
+                    "sqlite.unavailable",
                     f"SQLite sink unavailable "
                     f"(failure {self.sqlite_consecutive_failures}/"
                     f"{self.sqlite_retry_max_failures}); "
                     f"retrying in {self.sqlite_retry_cooldown_seconds:.1f}s: {exc}",
-                    flush=True,
+                    level="warning",
+                    service=_LOG_SERVICE,
+                    sqlite_path=self.sqlite_path,
+                    consecutive_failures=self.sqlite_consecutive_failures,
+                    retry_max_failures=self.sqlite_retry_max_failures,
+                    retry_cooldown_seconds=self.sqlite_retry_cooldown_seconds,
+                    error=str(exc),
                 )
                 self._log_sqlite_failure_threshold()
 
@@ -353,12 +378,19 @@ class EventWriter:
             self.sqlite_next_retry_monotonic = (
                 time.monotonic() + self.sqlite_retry_cooldown_seconds
             )
-            print(
+            emit_structured_log(
+                "sqlite.write_failed",
                 f"SQLite sink write failed "
                 f"(failure {self.sqlite_consecutive_failures}/"
                 f"{self.sqlite_retry_max_failures}); "
                 f"retrying in {self.sqlite_retry_cooldown_seconds:.1f}s: {exc}",
-                flush=True,
+                level="warning",
+                service=_LOG_SERVICE,
+                sqlite_path=self.sqlite_path,
+                consecutive_failures=self.sqlite_consecutive_failures,
+                retry_max_failures=self.sqlite_retry_max_failures,
+                retry_cooldown_seconds=self.sqlite_retry_cooldown_seconds,
+                error=str(exc),
             )
             self._log_sqlite_failure_threshold()
 

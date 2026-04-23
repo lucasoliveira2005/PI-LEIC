@@ -5,16 +5,11 @@ from __future__ import annotations
 
 import json
 import sqlite3
-import sys
 from datetime import datetime, timezone
 from pathlib import Path
 from typing import Any, Dict, Iterable, Iterator, List, Optional
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
-
-from metrics_identity import extract_cell_ue_entities  # noqa: E402
+from metrics_identity import extract_cell_ue_entities
 
 
 def extract_payload(entry: Dict) -> Dict:

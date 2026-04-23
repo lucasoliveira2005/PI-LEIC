@@ -9,6 +9,8 @@ import time
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
+from shared.structured_logging import emit_structured_log
+
 from .config import (
     METRICS_SCHEMA_VERSION,
     METRICS_SILENCE_THRESHOLD_SECONDS,
@@ -33,6 +35,9 @@ from .config import (
 from .enrichment import enrich_event, load_sources, source_endpoint, summarize_event
 from .storage import EventWriter
 from .transport import build_transport_adapter
+
+
+_LOG_SERVICE = "metrics_collector"
 
 
 class MetricsSourceWorker:
@@ -63,46 +68,92 @@ class MetricsSourceWorker:
         self.transport_adapter.stop()
 
     def on_open(self, ws: Any) -> None:
-        print(
+        emit_structured_log(
+            "source.connected",
             f"[{self.source['source_id']}] Connected to {source_endpoint(self.source)} via websocket",
-            flush=True,
+            service=_LOG_SERVICE,
+            source_id=self.source["source_id"],
+            source_endpoint=source_endpoint(self.source),
+            transport="websocket",
         )
         ws.send(json.dumps({"cmd": "metrics_subscribe"}))
-        print(f"[{self.source['source_id']}] Subscribed to metrics", flush=True)
+        emit_structured_log(
+            "source.subscribed",
+            f"[{self.source['source_id']}] Subscribed to metrics",
+            service=_LOG_SERVICE,
+            source_id=self.source["source_id"],
+        )
 
     def on_message(self, _ws: Any, message: str) -> None:
         try:
             payload = json.loads(message)
         except json.JSONDecodeError:
-            print(f"[{self.source['source_id']}] Non-JSON message: {message}", flush=True)
+            emit_structured_log(
+                "source.non_json_message",
+                f"[{self.source['source_id']}] Non-JSON message: {message}",
+                level="warning",
+                service=_LOG_SERVICE,
+                source_id=self.source["source_id"],
+                payload_preview=message[:200],
+            )
             return
 
         if not isinstance(payload, dict):
             # Reject non-dict JSON (list, null, scalar) — enrich_event expects a dict.
-            print(
+            emit_structured_log(
+                "source.unexpected_payload_type",
                 f"[{self.source['source_id']}] Unexpected payload type "
                 f"{type(payload).__name__}: {message[:120]}",
-                flush=True,
+                level="warning",
+                service=_LOG_SERVICE,
+                source_id=self.source["source_id"],
+                payload_type=type(payload).__name__,
+                payload_preview=message[:120],
             )
             return
 
         if "cmd" in payload:
-            print(f"[{self.source['source_id']}] Control message: {payload}", flush=True)
+            emit_structured_log(
+                "source.control_message",
+                f"[{self.source['source_id']}] Control message: {payload}",
+                service=_LOG_SERVICE,
+                source_id=self.source["source_id"],
+                payload=payload,
+            )
             return
 
         self.last_message_monotonic = time.monotonic()
         self._silence_alert_sent = False
         event = enrich_event(self.source, payload)
         self.writer.write(event)
-        print(summarize_event(event), flush=True)
+        emit_structured_log(
+            "metric.received",
+            summarize_event(event),
+            service=_LOG_SERVICE,
+            source_id=self.source["source_id"],
+            metric_family=event.get("metric_family"),
+            event_type=event.get("event_type"),
+            timestamp=event.get("timestamp"),
+        )
 
     def on_error(self, _ws: Any, error: Any) -> None:
-        print(f"[{self.source['source_id']}] WebSocket error: {error}", flush=True)
+        emit_structured_log(
+            "source.websocket_error",
+            f"[{self.source['source_id']}] WebSocket error: {error}",
+            level="error",
+            service=_LOG_SERVICE,
+            source_id=self.source["source_id"],
+            error=str(error),
+        )
 
     def on_close(self, _ws: Any, close_status_code: Any, close_msg: Any) -> None:
-        print(
+        emit_structured_log(
+            "source.closed",
             f"[{self.source['source_id']}] Closed: {close_status_code} {close_msg}",
-            flush=True,
+            service=_LOG_SERVICE,
+            source_id=self.source["source_id"],
+            close_status_code=close_status_code,
+            close_message=close_msg,
         )
 
     def run(self) -> None:
@@ -117,14 +168,24 @@ class MetricsSourceWorker:
             except KeyboardInterrupt:
                 raise
             except Exception as exc:
-                print(f"[{self.source['source_id']}] Unexpected error: {exc}", flush=True)
+                emit_structured_log(
+                    "source.unexpected_error",
+                    f"[{self.source['source_id']}] Unexpected error: {exc}",
+                    level="error",
+                    service=_LOG_SERVICE,
+                    source_id=self.source["source_id"],
+                    error=str(exc),
+                )
 
             if self.stop_event.is_set():
                 break
 
-            print(
+            emit_structured_log(
+                "source.reconnecting",
                 f"[{self.source['source_id']}] Reconnecting in {RECONNECT_SECONDS} seconds...",
-                flush=True,
+                service=_LOG_SERVICE,
+                source_id=self.source["source_id"],
+                reconnect_seconds=RECONNECT_SECONDS,
             )
             # Event.wait() returns immediately when stop_event is set, allowing fast shutdown
             # during the reconnect backoff window.
@@ -159,10 +220,15 @@ def _watchdog_loop(workers: List[MetricsSourceWorker], stop_event: threading.Eve
                 continue
             worker._silence_alert_sent = True
             source_id = worker.source["source_id"]
-            print(
+            emit_structured_log(
+                "source.silent",
                 f"[{source_id}] WATCHDOG: silent for {silence:.0f}s "
                 f"(threshold={METRICS_SILENCE_THRESHOLD_SECONDS:.0f}s)",
-                flush=True,
+                level="warning",
+                service=_LOG_SERVICE,
+                source_id=source_id,
+                silence_seconds=round(silence, 1),
+                threshold_seconds=METRICS_SILENCE_THRESHOLD_SECONDS,
             )
             try:
                 now_iso = datetime.now(timezone.utc).isoformat()
@@ -183,9 +249,13 @@ def _watchdog_loop(workers: List[MetricsSourceWorker], stop_event: threading.Eve
                 }
                 worker.writer.write(silent_event)
             except Exception as exc:
-                print(
+                emit_structured_log(
+                    "source.silent_event_write_failed",
                     f"[{source_id}] WATCHDOG: failed to write silent event: {exc}",
-                    flush=True,
+                    level="error",
+                    service=_LOG_SERVICE,
+                    source_id=source_id,
+                    error=str(exc),
                 )
 
 
@@ -207,19 +277,37 @@ def main() -> None:
         sqlite_retention_vacuum=METRICS_SQLITE_RETENTION_VACUUM,
     )
 
-    print(f"Metrics collector ready. Sources: {SOURCES_CONFIG.resolve()}", flush=True)
-    print(f"Writing enriched metrics to: {OUT.resolve()}", flush=True)
+    emit_structured_log(
+        "collector.ready",
+        f"Metrics collector ready. Sources: {SOURCES_CONFIG.resolve()}",
+        service=_LOG_SERVICE,
+        sources_config=SOURCES_CONFIG.resolve(),
+    )
+    emit_structured_log(
+        "collector.output_configured",
+        f"Writing enriched metrics to: {OUT.resolve()}",
+        service=_LOG_SERVICE,
+        output_path=OUT.resolve(),
+    )
     if ROTATE_MAX_BYTES > 0 and ROTATE_MAX_FILES > 0:
-        print(
+        emit_structured_log(
+            "collector.rotation_enabled",
             f"Rotation enabled: METRICS_ROTATE_MAX_BYTES={ROTATE_MAX_BYTES}, "
             f"METRICS_ROTATE_MAX_FILES={ROTATE_MAX_FILES}",
-            flush=True,
+            service=_LOG_SERVICE,
+            rotate_max_bytes=ROTATE_MAX_BYTES,
+            rotate_max_files=ROTATE_MAX_FILES,
         )
     else:
-        print("Rotation disabled for metrics output.", flush=True)
+        emit_structured_log(
+            "collector.rotation_disabled",
+            "Rotation disabled for metrics output.",
+            service=_LOG_SERVICE,
+        )
 
     if METRICS_SQLITE_ENABLED:
-        print(
+        emit_structured_log(
+            "collector.sqlite_enabled",
             f"SQLite cache enabled: METRICS_SQLITE_PATH={METRICS_SQLITE_PATH} "
             f"(timeout={METRICS_SQLITE_TIMEOUT_SECONDS}s, "
             f"retry_max_failures={METRICS_SQLITE_RETRY_MAX_FAILURES}, "
@@ -228,27 +316,55 @@ def main() -> None:
             f"retention_max_rows={METRICS_SQLITE_RETENTION_MAX_ROWS}, "
             f"retention_interval_events={METRICS_SQLITE_RETENTION_INTERVAL_EVENTS}, "
             f"retention_vacuum={1 if METRICS_SQLITE_RETENTION_VACUUM else 0})",
-            flush=True,
+            service=_LOG_SERVICE,
+            sqlite_path=METRICS_SQLITE_PATH,
+            sqlite_timeout_seconds=METRICS_SQLITE_TIMEOUT_SECONDS,
+            sqlite_retry_max_failures=METRICS_SQLITE_RETRY_MAX_FAILURES,
+            sqlite_retry_cooldown_seconds=METRICS_SQLITE_RETRY_COOLDOWN_SECONDS,
+            sqlite_retention_max_age_days=METRICS_SQLITE_RETENTION_MAX_AGE_DAYS,
+            sqlite_retention_max_rows=METRICS_SQLITE_RETENTION_MAX_ROWS,
+            sqlite_retention_interval_events=METRICS_SQLITE_RETENTION_INTERVAL_EVENTS,
+            sqlite_retention_vacuum=METRICS_SQLITE_RETENTION_VACUUM,
         )
     else:
-        print("SQLite cache disabled for metrics output.", flush=True)
+        emit_structured_log(
+            "collector.sqlite_disabled",
+            "SQLite cache disabled for metrics output.",
+            service=_LOG_SERVICE,
+        )
 
-    print("Transport: websocket (srsRAN JSON metrics server)", flush=True)
+    emit_structured_log(
+        "collector.transport",
+        "Transport: websocket (srsRAN JSON metrics server)",
+        service=_LOG_SERVICE,
+        transport="websocket",
+    )
 
     if METRICS_WS_PING_INTERVAL_SECONDS > 0:
-        print(
+        emit_structured_log(
+            "collector.websocket_keepalive_enabled",
             f"WebSocket keepalive enabled: ping_interval={METRICS_WS_PING_INTERVAL_SECONDS}s, "
             f"ping_timeout={METRICS_WS_PING_TIMEOUT_SECONDS}s",
-            flush=True,
+            service=_LOG_SERVICE,
+            ping_interval_seconds=METRICS_WS_PING_INTERVAL_SECONDS,
+            ping_timeout_seconds=METRICS_WS_PING_TIMEOUT_SECONDS,
         )
     else:
-        print("WebSocket keepalive disabled.", flush=True)
+        emit_structured_log(
+            "collector.websocket_keepalive_disabled",
+            "WebSocket keepalive disabled.",
+            service=_LOG_SERVICE,
+        )
 
     stop_event = threading.Event()
     workers: List[MetricsSourceWorker] = []
 
     def _handle_sigterm(_signum: Any, _frame: Any) -> None:
-        print("\nReceived SIGTERM. Stopping metrics collector gracefully.", flush=True)
+        emit_structured_log(
+            "collector.sigterm",
+            "Received SIGTERM. Stopping metrics collector gracefully.",
+            service=_LOG_SERVICE,
+        )
         stop_event.set()
         for w in workers:
             w.stop()
@@ -277,7 +393,11 @@ def main() -> None:
         while not stop_event.is_set():
             stop_event.wait(1.0)
     except KeyboardInterrupt:
-        print("\nStopping metrics collector.", flush=True)
+        emit_structured_log(
+            "collector.keyboard_interrupt",
+            "Stopping metrics collector.",
+            service=_LOG_SERVICE,
+        )
         stop_event.set()
         for w in workers:
             w.stop()

@@ -1,6 +1,6 @@
 import unittest
 
-from src.metrics_identity import build_ue_identity, extract_cell_ue_entities
+from metrics_identity import build_ue_identity, extract_cell_ue_entities
 
 
 class MetricsIdentityTests(unittest.TestCase):

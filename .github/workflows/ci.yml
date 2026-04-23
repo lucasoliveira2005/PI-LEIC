@@ -17,10 +17,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install package in editable mode
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -e .
 
       - name: Shell syntax checks
         run: |
@@ -65,6 +65,7 @@ jobs:
           python -m py_compile src/shared/env_utils.py
           python -m py_compile src/shared/identity.py
           python -m py_compile src/shared/liveness.py
+          python -m py_compile src/shared/structured_logging.py
           python -m py_compile src/metrics_api.py
           python -m py_compile src/metrics_liveness.py
           python -m py_compile src/metrics_rest_api.py
@@ -102,10 +103,10 @@ jobs:
         with:
           python-version: "3.11"
 
-      - name: Install dependencies
+      - name: Install package in editable mode
         run: |
           python -m pip install --upgrade pip
-          python -m pip install -r requirements.txt
+          python -m pip install -e .
 
       - name: Seed synthetic JSONL fixture
         run: |

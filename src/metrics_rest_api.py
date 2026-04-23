@@ -18,7 +18,6 @@ from __future__ import annotations
 import json
 import os
 import sqlite3
-import sys
 import threading
 import time
 import uuid
@@ -30,19 +29,17 @@ from typing import Any, Dict, List, Optional
 from fastapi import FastAPI, HTTPException, Query
 from fastapi.responses import PlainTextResponse
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
-
-from api_models import ActionRequest, QueryRequest  # noqa: E402
-from env_utils import (  # noqa: E402
+from api_models import ActionRequest, QueryRequest
+from env_utils import (
     parse_bool_env,
     parse_float_env,
     parse_non_negative_float_env,
     parse_non_negative_int_env,
 )
-from metrics_api import MetricsLogReader, parse_timestamp_to_epoch  # noqa: E402
-from metrics_liveness import settings_from_env  # noqa: E402
+from metrics_api import MetricsLogReader, parse_timestamp_to_epoch
+from metrics_liveness import settings_from_env
+
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 # ── Section: Configuration ─────────────────────────────────────────────────────
 
@@ -76,6 +73,7 @@ AUDIT_DB_TIMEOUT_SECONDS = parse_non_negative_float_env("API_AUDIT_DB_TIMEOUT_SE
 API_HOST = os.environ.get("API_HOST", "0.0.0.0")
 API_PORT = parse_non_negative_int_env("API_PORT", 8000) or 8000
 QUERY_BACKEND_MODE = os.environ.get("QUERY_BACKEND_MODE", "heuristic-stub").strip() or "heuristic-stub"
+METRICS_WINDOW_MAX_ITEMS = parse_non_negative_int_env("METRICS_WINDOW_MAX_ITEMS", 10000) or 10000
 LLM_INTEGRATED = False
 ACTION_EXECUTION_MODE = "audit-only-stub"
 ACTION_MUTATION_PIPELINE_ENABLED = False
@@ -849,6 +847,8 @@ def get_metrics(
     source_id: Optional[str] = Query(default=None, description="Filter by source identifier (e.g. gnb1)."),
     from_ts: Optional[str] = Query(default=None, alias="from", description="ISO-8601 start timestamp."),
     to_ts: Optional[str] = Query(default=None, alias="to", description="ISO-8601 end timestamp."),
+    limit: Optional[int] = Query(default=None, ge=1, description="Max items to return (window mode). Capped at METRICS_WINDOW_MAX_ITEMS."),
+    offset: int = Query(default=0, ge=0, description="Number of items to skip (window mode)."),
 ) -> Dict[str, Any]:
     lower_epoch = _parse_query_epoch(from_ts, "from")
     upper_epoch = _parse_query_epoch(to_ts, "to")
@@ -858,14 +858,23 @@ def get_metrics(
 
     if lower_epoch is not None or upper_epoch is not None:
         reader = _reader()
-        items = _window_metrics(reader, lower_epoch, upper_epoch, cell_id, source_id)
-        return {
+        all_items = _window_metrics(reader, lower_epoch, upper_epoch, cell_id, source_id)
+        total = len(all_items)
+        effective_limit = min(limit, METRICS_WINDOW_MAX_ITEMS) if limit is not None else METRICS_WINDOW_MAX_ITEMS
+        items = all_items[offset : offset + effective_limit]
+        response: Dict[str, Any] = {
             "schema_version": API_SCHEMA_VERSION,
             "mode": "time-window",
             "transport": _transport_metadata(),
+            "total": total,
+            "offset": offset,
+            "limit": effective_limit,
             "count": len(items),
             "items": items,
         }
+        if offset + len(items) < total:
+            response["has_more"] = True
+        return response
 
     snapshot, _ = _cached_snapshot()
     items: List[Dict[str, Any]] = []
@@ -1066,7 +1075,7 @@ def post_query(payload: QueryRequest) -> Dict[str, Any]:
 @app.post("/actions")
 def post_actions(payload: ActionRequest) -> Dict[str, Any]:
     request_id = _new_request_id()
-    intent_payload = payload.intent.model_dump()
+    intent_payload = payload.intent.model_dump() if payload.intent is not None else None
     audit_event = {
         "schema_version": API_SCHEMA_VERSION,
         "event_type": "state",
@@ -1075,8 +1084,8 @@ def post_actions(payload: ActionRequest) -> Dict[str, Any]:
         "request": payload.request,
         "intent": intent_payload,
         "intent_checks": {
-            "safety_checks_count": len(intent_payload.get("safety_checks") or []),
-            "dry_run": bool(intent_payload.get("dry_run")),
+            "safety_checks_count": len((intent_payload or {}).get("safety_checks") or []),
+            "dry_run": bool((intent_payload or {}).get("dry_run")),
             "within_bounds": True,
         },
     }

@@ -5,9 +5,82 @@ import unittest
 from datetime import datetime, timezone
 from pathlib import Path
 
-from fastapi.testclient import TestClient
+from fastapi import HTTPException
+from pydantic import ValidationError
 
-import src.metrics_rest_api as metrics_rest_api
+from api_models import ActionRequest, QueryRequest
+import metrics_rest_api
+
+
+class _DirectResponse:
+    def __init__(self, status_code, payload=None, text=None, headers=None):
+        self.status_code = status_code
+        self._payload = payload
+        self.text = text or ""
+        self.headers = headers or {}
+
+    def json(self):
+        return self._payload
+
+
+class _DirectClient:
+    """Small route harness that avoids Starlette TestClient threadpool hangs.
+
+    The CI api_smoke job still starts the FastAPI app and calls it over HTTP;
+    these unit tests focus on route behavior and persistence side effects.
+    """
+
+    def get(self, path, params=None):
+        params = params or {}
+        try:
+            if path == "/metrics":
+                payload = metrics_rest_api.get_metrics(
+                    cell_id=params.get("cell_id"),
+                    source_id=params.get("source_id"),
+                    from_ts=params.get("from"),
+                    to_ts=params.get("to"),
+                    limit=int(params["limit"]) if params.get("limit") is not None else None,
+                    offset=int(params.get("offset", 0)),
+                )
+                return _DirectResponse(200, payload=payload)
+            if path == "/alerts":
+                return _DirectResponse(
+                    200,
+                    payload=metrics_rest_api.get_alerts(status=params.get("status", "open")),
+                )
+            if path == "/health":
+                return _DirectResponse(200, payload=metrics_rest_api.get_health())
+            if path == "/capabilities":
+                return _DirectResponse(200, payload=metrics_rest_api.get_capabilities())
+            if path == "/metrics_prom":
+                response = metrics_rest_api.get_metrics_prom()
+                return _DirectResponse(
+                    response.status_code,
+                    text=response.body.decode("utf-8"),
+                    headers={"content-type": response.media_type or ""},
+                )
+        except HTTPException as exc:
+            return _DirectResponse(exc.status_code, payload={"detail": exc.detail})
+
+        return _DirectResponse(404, payload={"detail": "not found"})
+
+    def post(self, path, json=None):
+        body = json or {}
+        try:
+            if path == "/query":
+                return _DirectResponse(
+                    200,
+                    payload=metrics_rest_api.post_query(QueryRequest.model_validate(body)),
+                )
+            if path == "/actions":
+                return _DirectResponse(
+                    200,
+                    payload=metrics_rest_api.post_actions(ActionRequest.model_validate(body)),
+                )
+        except ValidationError as exc:
+            return _DirectResponse(422, payload={"detail": exc.errors()})
+
+        return _DirectResponse(404, payload={"detail": "not found"})
 
 
 class MetricsRestApiTests(unittest.TestCase):
@@ -55,7 +128,7 @@ class MetricsRestApiTests(unittest.TestCase):
         # Lifespan is not triggered by TestClient directly; prime the schema here.
         metrics_rest_api._ensure_audit_schema()
 
-        self.client = TestClient(metrics_rest_api.app)
+        self.client = _DirectClient()
 
     def tearDown(self):
         for key, value in self._originals.items():
@@ -402,6 +475,63 @@ class MetricsRestApiTests(unittest.TestCase):
             after = conn.execute("SELECT COUNT(*) FROM api_alert_state").fetchone()[0]
 
         self.assertEqual(before, after)
+
+    def test_get_metrics_window_pagination(self):
+        self._write_events(
+            [
+                self._cells_event("gnb1", "2026-04-14T10:00:00+00:00", dl_brate=100),
+                self._cells_event("gnb1", "2026-04-14T10:01:00+00:00", dl_brate=200),
+                self._cells_event("gnb1", "2026-04-14T10:02:00+00:00", dl_brate=300),
+                self._cells_event("gnb1", "2026-04-14T10:03:00+00:00", dl_brate=400),
+            ]
+        )
+
+        response = self.client.get(
+            "/metrics",
+            params={
+                "from": "2026-04-14T09:00:00+00:00",
+                "to": "2026-04-14T11:00:00+00:00",
+                "limit": "2",
+                "offset": "0",
+            },
+        )
+        self.assertEqual(response.status_code, 200)
+        payload = response.json()
+        self.assertEqual(payload["mode"], "time-window")
+        self.assertEqual(payload["total"], 4)
+        self.assertEqual(payload["count"], 2)
+        self.assertEqual(payload["offset"], 0)
+        self.assertTrue(payload.get("has_more"))
+
+        page2 = self.client.get(
+            "/metrics",
+            params={
+                "from": "2026-04-14T09:00:00+00:00",
+                "to": "2026-04-14T11:00:00+00:00",
+                "limit": "2",
+                "offset": "2",
+            },
+        )
+        payload2 = page2.json()
+        self.assertEqual(payload2["total"], 4)
+        self.assertEqual(payload2["count"], 2)
+        self.assertEqual(payload2["offset"], 2)
+        self.assertNotIn("has_more", payload2)
+
+    def test_post_actions_approve_true_without_intent_returns_422(self):
+        response = self.client.post(
+            "/actions",
+            json={"request": "do something", "approve": True},
+        )
+        self.assertEqual(response.status_code, 422)
+
+    def test_post_actions_approve_false_without_intent_returns_pending(self):
+        response = self.client.post(
+            "/actions",
+            json={"request": "do something", "approve": False},
+        )
+        self.assertEqual(response.status_code, 200)
+        self.assertEqual(response.json()["status"], "pending_approval")
 
 
 if __name__ == "__main__":

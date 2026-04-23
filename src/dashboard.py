@@ -12,12 +12,10 @@ import sys
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Tuple
 
-SCRIPT_DIR = Path(__file__).resolve().parent
-if str(SCRIPT_DIR) not in sys.path:
-    sys.path.insert(0, str(SCRIPT_DIR))
+from env_utils import parse_bool_env, parse_non_negative_int_env
+from metrics_api import MetricsLogReader
 
-from env_utils import parse_bool_env, parse_non_negative_int_env  # noqa: E402
-from metrics_api import MetricsLogReader  # noqa: E402
+SCRIPT_DIR = Path(__file__).resolve().parent
 
 LOG_FILE: Path = Path(os.environ.get("METRICS_OUT", str(SCRIPT_DIR / "../metrics/gnb_metrics.jsonl")))
 LOG_INCLUDE_ROTATED: bool = parse_bool_env("METRICS_LOG_INCLUDE_ROTATED", True)

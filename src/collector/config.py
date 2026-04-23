@@ -3,20 +3,17 @@
 from __future__ import annotations
 
 import os
-import sys
 from pathlib import Path
 
-_COLLECTOR_DIR = Path(__file__).resolve().parent  # src/collector/
-_SRC_DIR = _COLLECTOR_DIR.parent                  # src/
-if str(_SRC_DIR) not in sys.path:
-    sys.path.insert(0, str(_SRC_DIR))
-
-from env_utils import (  # noqa: E402
+from env_utils import (
     parse_bool_env,
     parse_non_negative_float_env,
     parse_non_negative_int_env,
     parse_positive_int_env,
 )
+
+_COLLECTOR_DIR = Path(__file__).resolve().parent  # src/collector/
+_SRC_DIR = _COLLECTOR_DIR.parent                  # src/
 
 SOURCES_CONFIG: Path = Path(
     os.environ.get("METRICS_SOURCES_CONFIG", str(_SRC_DIR / "../config/metrics_sources.json"))

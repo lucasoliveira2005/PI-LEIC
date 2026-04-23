@@ -1,0 +1,40 @@
+[build-system]
+requires = ["setuptools>=68.0"]
+build-backend = "setuptools.build_meta"
+
+[project]
+name = "pi-leic"
+version = "0.1.0"
+description = "5G RAN monitoring and control platform for the FEUP lab testbed."
+requires-python = ">=3.10"
+dependencies = [
+    "websocket-client>=1.8,<2",
+    "matplotlib>=3.8,<4",
+    "fastapi>=0.111,<1",
+    "uvicorn>=0.30,<1",
+    "httpx>=0.27,<1",
+    "pydantic>=2.0,<3",
+]
+
+[tool.setuptools]
+py-modules = [
+    "api_models",
+    "dashboard",
+    "env_utils",
+    "metrics_api",
+    "metrics_collector",
+    "metrics_identity",
+    "metrics_liveness",
+    "metrics_rest_api",
+    "provision_subscribers",
+]
+
+[tool.setuptools.package-dir]
+"" = "src"
+
+[tool.setuptools.packages.find]
+where = ["src"]
+
+[tool.ruff.lint]
+select = ["E", "F"]
+ignore = ["E501"]
