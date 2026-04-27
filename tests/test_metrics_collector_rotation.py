@@ -87,7 +87,7 @@ class EventWriterRotationTests(unittest.TestCase):
         )
 
         class FlakySink:
-            def write_event(self, _event):
+            def write_event(self, _event, **_kwargs):
                 raise sqlite3.OperationalError("database is locked")
 
         writer.sqlite_sink = FlakySink()

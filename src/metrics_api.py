@@ -298,44 +298,36 @@ class MetricsLogReader:
         if not self.sqlite_path or not self.sqlite_path.exists():
             return None
 
+        # MAX(id) replaces the previous ROW_NUMBER() OVER (PARTITION BY ...)
+        # scan: events.id is INTEGER PRIMARY KEY AUTOINCREMENT and the
+        # collector serialises inserts under EventWriter.lock, so id is
+        # monotonic with arrival order. The composite (metric_family,
+        # source_id, id) index makes the MAX/COUNT pair index-only. Picking
+        # the most recently arrived row also degrades more gracefully than
+        # ORDER BY collector_timestamp DESC under NTP step-backs.
         query = """
-            WITH source_event_counts AS (
+            WITH source_aggregates AS (
                 SELECT
                     source_id,
+                    MAX(id) AS latest_id,
                     COUNT(*) AS source_sequence
                 FROM metrics_events
                 WHERE metric_family = 'cells'
                 GROUP BY source_id
-            ),
-            latest_source_events AS (
-                SELECT
-                    id,
-                    source_id,
-                    event_timestamp,
-                    collector_timestamp,
-                    ROW_NUMBER() OVER (
-                        PARTITION BY source_id
-                        ORDER BY collector_timestamp DESC, id DESC
-                    ) AS row_num
-                FROM metrics_events
-                WHERE metric_family = 'cells'
             )
             SELECT
                 e.source_id,
                 e.event_timestamp,
                 e.collector_timestamp,
-                sec.source_sequence,
+                sa.source_sequence,
                 ce.cell_index,
                 ce.ue_index,
                 ce.ue_identity,
                 ce.pci,
                 ce.ue_json
-            FROM latest_source_events AS lse
+            FROM source_aggregates AS sa
             JOIN metrics_events AS e
-              ON e.id = lse.id
-             AND lse.row_num = 1
-            JOIN source_event_counts AS sec
-              ON sec.source_id = e.source_id
+              ON e.id = sa.latest_id
             JOIN metrics_cell_entities AS ce
               ON ce.event_id = e.id
             ORDER BY e.source_id, ce.cell_index, ce.ue_index

@@ -32,7 +32,15 @@ from .config import (
     SOURCES_CONFIG,
     _WATCHDOG_POLL_SECONDS,
 )
-from .enrichment import enrich_event, load_sources, source_endpoint, summarize_event
+from shared.identity import extract_cell_ue_entities
+
+from .enrichment import (
+    enrich_event,
+    load_sources,
+    metric_family,
+    source_endpoint,
+    summarize_event,
+)
 from .storage import EventWriter
 from .transport import build_transport_adapter
 
@@ -124,11 +132,18 @@ class MetricsSourceWorker:
 
         self.last_message_monotonic = time.monotonic()
         self._silence_alert_sent = False
-        event = enrich_event(self.source, payload)
-        self.writer.write(event)
+        # Extract UE entities once per event and reuse across enrich / write /
+        # summarize. Cells events otherwise pay this cost three times per tick.
+        entities = (
+            extract_cell_ue_entities(payload)
+            if metric_family(payload) == "cells"
+            else None
+        )
+        event = enrich_event(self.source, payload, entities=entities)
+        self.writer.write(event, entities=entities)
         emit_structured_log(
             "metric.received",
-            summarize_event(event),
+            summarize_event(event, entities=entities),
             service=_LOG_SERVICE,
             source_id=self.source["source_id"],
             metric_family=event.get("metric_family"),

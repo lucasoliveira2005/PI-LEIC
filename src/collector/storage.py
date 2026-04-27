@@ -8,7 +8,7 @@ import threading
 import time
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
-from typing import Any, Optional
+from typing import Any, Dict, List, Optional
 
 from shared.identity import extract_cell_ue_entities
 from shared.structured_logging import emit_structured_log
@@ -96,6 +96,15 @@ class SQLiteEventSink:
                 ON metrics_events(metric_family, collector_timestamp DESC)
                 """
             )
+            # Composite index that lets the latest-by-source query (MAX(id) +
+            # COUNT(*) GROUP BY source_id WHERE metric_family = 'cells') stay
+            # index-only without scanning the cells partition.
+            self.conn.execute(
+                """
+                CREATE INDEX IF NOT EXISTS idx_metrics_events_family_source_id
+                ON metrics_events(metric_family, source_id, id)
+                """
+            )
             self.conn.execute(
                 """
                 CREATE INDEX IF NOT EXISTS idx_metrics_cell_entities_latest
@@ -113,12 +122,26 @@ class SQLiteEventSink:
                 except sqlite3.OperationalError:
                     pass  # Column already exists.
 
-    def write_event(self, event: dict) -> None:
+    def write_event(
+        self,
+        event: dict,
+        *,
+        entities: Optional[List[Dict[str, Any]]] = None,
+        raw_json: Optional[str] = None,
+    ) -> None:
+        """Persist *event*.
+
+        *entities* and *raw_json* are caller-provided caches: if the caller
+        already serialised the event for JSONL or extracted UE entities for
+        another consumer, passing them in here avoids redundant JSON encoding
+        and entity walks on the hot path.
+        """
         collector_timestamp = (
             event.get("collector_timestamp") or datetime.now(timezone.utc).isoformat()
         )
         metric_family = event.get("metric_family") or "unknown"
-        raw_json = json.dumps(event, ensure_ascii=False)
+        if raw_json is None:
+            raw_json = json.dumps(event, ensure_ascii=False)
 
         with self.conn:
             cursor = self.conn.execute(
@@ -154,7 +177,8 @@ class SQLiteEventSink:
             if not isinstance(payload, dict):
                 return
 
-            entities = extract_cell_ue_entities(payload)
+            if entities is None:
+                entities = extract_cell_ue_entities(payload)
             for entity in entities:
                 ue_metrics = entity.get("ue") or {}
                 signal_db = ue_metrics.get("pucch_snr_db", ue_metrics.get("pusch_snr_db"))
@@ -360,7 +384,13 @@ class EventWriter:
 
             return False
 
-    def _write_to_sqlite_with_recovery(self, event: dict) -> None:
+    def _write_to_sqlite_with_recovery(
+        self,
+        event: dict,
+        *,
+        entities: Optional[List[Dict[str, Any]]] = None,
+        raw_json: Optional[str] = None,
+    ) -> None:
         if not self.sqlite_enabled:
             return
 
@@ -371,7 +401,9 @@ class EventWriter:
                 return
 
         try:
-            self.sqlite_sink.write_event(event)  # type: ignore[union-attr]
+            self.sqlite_sink.write_event(  # type: ignore[union-attr]
+                event, entities=entities, raw_json=raw_json
+            )
         except Exception as exc:
             self.sqlite_sink = None
             self.sqlite_consecutive_failures += 1
@@ -419,7 +451,15 @@ class EventWriter:
 
         self.output_path.replace(self._rotated_path(1))
 
-    def write(self, event: dict) -> None:
+    def write(
+        self,
+        event: dict,
+        *,
+        entities: Optional[List[Dict[str, Any]]] = None,
+    ) -> None:
+        # Serialise once and reuse for both the JSONL line and SQLite raw_json
+        # — the event embeds the full raw_payload so this dump dominates the
+        # per-event CPU cost.
         line = json.dumps(event, ensure_ascii=False)
         with self.lock:
             self._rotate_if_needed()
@@ -427,4 +467,4 @@ class EventWriter:
                 f.write(line + "\n")
                 f.flush()
 
-            self._write_to_sqlite_with_recovery(event)
+            self._write_to_sqlite_with_recovery(event, entities=entities, raw_json=line)

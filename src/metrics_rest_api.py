@@ -93,8 +93,10 @@ _SERVICE_START_MONOTONIC = time.monotonic()
 
 # ---------------------------------------------------------------------------
 # Snapshot cache — avoids re-reading SQLite/JSONL on every HTTP request.
-# Both latest_cells_by_source() and latest_sample_epoch_by_source() are
-# fetched together and cached for METRICS_SNAPSHOT_TTL_SECONDS seconds.
+# We pull the snapshot from latest_cells_by_source() once per cache miss and
+# derive the per-source sample epochs from the snapshot in pure Python; the
+# reader's latest_sample_epoch_by_source() helper internally re-runs the
+# heavy latest-by-source query, so calling it here would double the cost.
 # Window queries (time-range) are never cached; they are always fresh reads.
 # TTL is capped at _SNAPSHOT_TTL_MAX_SECONDS so a misconfigured value (e.g.
 # METRICS_SNAPSHOT_TTL_SECONDS=99999) cannot serve indefinitely stale data
@@ -197,7 +199,10 @@ def _cached_snapshot() -> tuple:
     # Read outside the lock so concurrent requests don't serialise on I/O.
     reader = _reader()
     snapshot = reader.latest_cells_by_source()
-    sample_epochs = reader.latest_sample_epoch_by_source()
+    sample_epochs = {
+        source_id: _sample_epoch(source_entry)
+        for source_id, source_entry in snapshot.items()
+    }
 
     with _SNAPSHOT_CACHE_LOCK:
         _snapshot_cache = {
@@ -964,7 +969,12 @@ def get_health() -> Dict[str, Any]:
         # went silent.  The TTL cache is still used by /metrics and /alerts.
         _health_reader = _reader()
         snapshot = _health_reader.latest_cells_by_source()
-        sample_epochs = _health_reader.latest_sample_epoch_by_source()
+        # Derive epochs from the snapshot rather than calling
+        # latest_sample_epoch_by_source(), which would re-run the
+        # latest-by-source query a second time per /health hit.
+        sample_epochs = {
+            sid: _sample_epoch(entry) for sid, entry in snapshot.items()
+        }
         snapshot_summary = _snapshot_summary(snapshot)
 
         for sid, source_entry in snapshot.items():

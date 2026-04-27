@@ -5,7 +5,7 @@ from __future__ import annotations
 import json
 import urllib.parse
 from datetime import datetime, timezone
-from typing import Dict, List, Optional
+from typing import Any, Dict, List, Optional
 
 from shared.identity import extract_cell_ue_entities
 
@@ -103,7 +103,9 @@ def _calculate_bler_pct(ue_metrics: Dict) -> Optional[float]:
     return round(float(nok) / total * 100.0, 2)
 
 
-def extract_contract_fields(payload: Dict) -> Dict:
+def extract_contract_fields(
+    payload: Dict, entities: Optional[List[Dict[str, Any]]] = None
+) -> Dict:
     """Extract and derive D1 contract fields from a srsRAN metrics payload.
 
     Fields derivable from the WebSocket metrics path:
@@ -117,6 +119,9 @@ def extract_contract_fields(payload: Dict) -> Dict:
       prb_usage_pct — needs PRB grant/capacity reporting from the scheduler
       latency_ms    — not exported via the WebSocket metrics path
       rsrp_dbm      — not exported via the WebSocket metrics path
+
+    The *entities* kwarg accepts a pre-computed entity list to avoid re-walking
+    payload["cells"] when the caller already extracted them. None means extract.
     """
     contract_fields: Dict = {}
 
@@ -135,7 +140,8 @@ def extract_contract_fields(payload: Dict) -> Dict:
         if value not in (None, ""):
             contract_fields[key] = value
 
-    entities = extract_cell_ue_entities(payload)
+    if entities is None:
+        entities = extract_cell_ue_entities(payload)
     if not entities:
         return contract_fields
 
@@ -199,9 +205,17 @@ def extract_context(payload: Dict) -> Dict:
     return context
 
 
-def enrich_event(source: Dict, payload: Dict) -> Dict:
+def enrich_event(
+    source: Dict, payload: Dict, entities: Optional[List[Dict[str, Any]]] = None
+) -> Dict:
     family = metric_family(payload)
     endpoint_value = source.get("ws_url")
+
+    # Cells events are the only family whose entities are consumed downstream
+    # (storage, summarize, contract-field derivation). Extracting once here and
+    # threading the list through avoids 2× redundant entity walks per event.
+    if entities is None and family == "cells":
+        entities = extract_cell_ue_entities(payload)
 
     event = {
         "collector_timestamp": datetime.now(timezone.utc).isoformat(),
@@ -215,17 +229,20 @@ def enrich_event(source: Dict, payload: Dict) -> Dict:
         "raw_payload": payload,
     }
     event.update(extract_context(payload))
-    event.update(extract_contract_fields(payload))
+    event.update(extract_contract_fields(payload, entities=entities))
     return event
 
 
-def summarize_event(event: Dict) -> str:
+def summarize_event(
+    event: Dict, entities: Optional[List[Dict[str, Any]]] = None
+) -> str:
     payload = event["raw_payload"]
     family = event["metric_family"]
     source_id = event["source_id"]
 
     if family == "cells":
-        entities = extract_cell_ue_entities(payload)
+        if entities is None:
+            entities = extract_cell_ue_entities(payload)
         if entities:
             sample = entities[0]
             sample_ue = sample.get("ue") or {}
