@@ -2,7 +2,7 @@
 
 PI-LEIC is a proof-of-concept 5G RAN monitoring and control platform for the FEUP lab.
 
-For a detailed contributor-oriented guide, see [PROJECT_GUIDE.md](PROJECT_GUIDE.md). For the current stage status and open gaps, see [STAGE_OVERVIEW.md](STAGE_OVERVIEW.md).
+
 
 ## One-sentence summary
 
