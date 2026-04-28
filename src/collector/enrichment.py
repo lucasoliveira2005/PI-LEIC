@@ -7,7 +7,7 @@ import urllib.parse
 from datetime import datetime, timezone
 from typing import Any, Dict, List, Optional
 
-from shared.identity import extract_cell_ue_entities
+from shared.identity import extract_cell_ue_entities  # re-exported for collector consumers
 
 from .config import METRICS_SCHEMA_VERSION, SOURCES_CONFIG
 
@@ -76,105 +76,37 @@ def classify_event_type(payload: Dict, family: str) -> str:
     return "metric"
 
 
-def _calculate_bler_pct(ue_metrics: Dict) -> Optional[float]:
-    """Derive DL retransmission ratio from per-UE counters.
+_CONTRACT_FIELD_KEYS = (
+    "cell_id",
+    "ue_id",
+    "latency_ms",
+    "throughput_mbps",
+    "prb_usage_pct",
+    "bler_pct",
+    "rsrp_dbm",
+)
 
-    Supports two counter naming conventions:
-    - Newer srsRAN: ``dl_nof_nok`` / ``dl_nof_ok``
-    - Older srsRAN: ``dl_retx`` / ``dl_ok``
 
-    Returns None when the required counters are absent.
+def extract_contract_fields(payload: Dict) -> Dict:
+    """Pass through D1 contract fields already present at the payload top level.
+
+    The current WebSocket metrics path does **not** supply these fields — a
+    cells/du/du_low payload is multi-UE/multi-cell, and any single value at the
+    event level can only describe one entity. Per-UE truth lives inside
+    ``raw_payload.cells[].ue_list[]`` and the denormalized ``metrics_cell_entities``
+    SQLite rows; consumers compute per-UE throughput/BLER from those (e.g.
+    ``/metrics_prom`` derives ``gnb_ue_throughput_mbps`` from ``dl_brate +
+    ul_brate`` per entity).
+
+    The pass-through is kept as the Phase-2 hook: when the E2SM-KPM adapter
+    starts delivering KPIs that are already scoped to a (cell, UE) pair, those
+    fields will ride through unchanged at the event level.
     """
-    nok = (
-        ue_metrics.get("dl_nof_nok")
-        if ue_metrics.get("dl_nof_nok") is not None
-        else ue_metrics.get("dl_retx")
-    )
-    ok = (
-        ue_metrics.get("dl_nof_ok")
-        if ue_metrics.get("dl_nof_ok") is not None
-        else ue_metrics.get("dl_ok")
-    )
-    if nok is None:
-        return None
-    total = float(nok) + float(ok or 0)
-    if total <= 0:
-        return None
-    return round(float(nok) / total * 100.0, 2)
-
-
-def extract_contract_fields(
-    payload: Dict, entities: Optional[List[Dict[str, Any]]] = None
-) -> Dict:
-    """Extract and derive D1 contract fields from a srsRAN metrics payload.
-
-    Fields derivable from the WebSocket metrics path:
-      cell_id, ue_id   — resolved via entity extraction (pci + ue_identity)
-      throughput_mbps  — sum of dl_brate + ul_brate from the first UE entity, in Mbps
-      bler_pct         — DL retransmission ratio from the first UE entity when counters
-                         are present (dl_nof_nok / (dl_nof_ok + dl_nof_nok), or the
-                         older dl_retx / (dl_ok + dl_retx) naming convention)
-
-    Fields that require the E2/RIC interface and are NOT populated here:
-      prb_usage_pct — needs PRB grant/capacity reporting from the scheduler
-      latency_ms    — not exported via the WebSocket metrics path
-      rsrp_dbm      — not exported via the WebSocket metrics path
-
-    The *entities* kwarg accepts a pre-computed entity list to avoid re-walking
-    payload["cells"] when the caller already extracted them. None means extract.
-    """
-    contract_fields: Dict = {}
-
-    # Pass through any contract field already present at the top level — the
-    # future E2SM KPM adapter (Phase 1) will supply these directly.
-    for key in (
-        "cell_id",
-        "ue_id",
-        "latency_ms",
-        "throughput_mbps",
-        "prb_usage_pct",
-        "bler_pct",
-        "rsrp_dbm",
-    ):
-        value = payload.get(key)
-        if value not in (None, ""):
-            contract_fields[key] = value
-
-    if entities is None:
-        entities = extract_cell_ue_entities(payload)
-    if not entities:
-        return contract_fields
-
-    first_entity = entities[0]
-    ue_metrics = first_entity.get("ue") or {}
-
-    # cell_id and ue_id from entity extraction.
-    if "cell_id" not in contract_fields and first_entity.get("pci") is not None:
-        contract_fields["cell_id"] = first_entity["pci"]
-
-    if "ue_id" not in contract_fields:
-        ue_identity = first_entity.get("ue_identity")
-        if isinstance(ue_identity, str) and ue_identity:
-            contract_fields["ue_id"] = (
-                ue_identity.split(":", 1)[1] if ":" in ue_identity else ue_identity
-            )
-
-    # throughput_mbps: derived from DL + UL bitrate (bits/s → Mbit/s).
-    if "throughput_mbps" not in contract_fields:
-        dl = ue_metrics.get("dl_brate")
-        ul = ue_metrics.get("ul_brate")
-        if dl is not None or ul is not None:
-            contract_fields["throughput_mbps"] = round(
-                (float(dl or 0) + float(ul or 0)) / 1_000_000, 4
-            )
-
-    # bler_pct: DL retransmission ratio, if counters are available.
-    if "bler_pct" not in contract_fields:
-        bler = _calculate_bler_pct(ue_metrics)
-        if bler is not None:
-            contract_fields["bler_pct"] = bler
-
-    return contract_fields
+    return {
+        key: payload[key]
+        for key in _CONTRACT_FIELD_KEYS
+        if payload.get(key) not in (None, "")
+    }
 
 
 def extract_context(payload: Dict) -> Dict:
@@ -205,17 +137,9 @@ def extract_context(payload: Dict) -> Dict:
     return context
 
 
-def enrich_event(
-    source: Dict, payload: Dict, entities: Optional[List[Dict[str, Any]]] = None
-) -> Dict:
+def enrich_event(source: Dict, payload: Dict) -> Dict:
     family = metric_family(payload)
     endpoint_value = source.get("ws_url")
-
-    # Cells events are the only family whose entities are consumed downstream
-    # (storage, summarize, contract-field derivation). Extracting once here and
-    # threading the list through avoids 2× redundant entity walks per event.
-    if entities is None and family == "cells":
-        entities = extract_cell_ue_entities(payload)
 
     event = {
         "collector_timestamp": datetime.now(timezone.utc).isoformat(),
@@ -229,7 +153,7 @@ def enrich_event(
         "raw_payload": payload,
     }
     event.update(extract_context(payload))
-    event.update(extract_contract_fields(payload, entities=entities))
+    event.update(extract_contract_fields(payload))
     return event
 
 

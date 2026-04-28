@@ -132,14 +132,14 @@ class MetricsSourceWorker:
 
         self.last_message_monotonic = time.monotonic()
         self._silence_alert_sent = False
-        # Extract UE entities once per event and reuse across enrich / write /
-        # summarize. Cells events otherwise pay this cost three times per tick.
+        # Extract UE entities once per event and reuse across write / summarize.
+        # Cells events otherwise pay this cost twice per tick.
         entities = (
             extract_cell_ue_entities(payload)
             if metric_family(payload) == "cells"
             else None
         )
-        event = enrich_event(self.source, payload, entities=entities)
+        event = enrich_event(self.source, payload)
         self.writer.write(event, entities=entities)
         emit_structured_log(
             "metric.received",

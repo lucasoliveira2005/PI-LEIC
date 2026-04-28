@@ -128,80 +128,64 @@ class EventWriterRotationTests(unittest.TestCase):
 
         self.assertLessEqual(event_count, 2)
 
-    def test_enrich_event_derives_throughput_mbps_from_brates(self):
+    def test_enrich_event_does_not_derive_event_level_contract_fields(self):
+        # A cells event covers multiple UEs/cells; any single event-level value
+        # would describe only one of them. Per-UE truth lives in
+        # raw_payload.cells[].ue_list[] and metrics_cell_entities rows.
         source = {"source_id": "gnb1", "gnb_id": "gnb-1", "ws_url": "ws://127.0.0.1:5001"}
         payload = {
             "timestamp": "2026-04-14T10:00:00+00:00",
             "cells": [
                 {
-                    "ue_list": [
-                        {"ue": "ueA", "dl_brate": 2_000_000.0, "ul_brate": 1_000_000.0}
-                    ]
-                }
-            ],
-        }
-
-        event = enrich_event(source, payload)
-
-        self.assertAlmostEqual(event["throughput_mbps"], 3.0, places=3)
-
-    def test_enrich_event_derives_bler_pct_from_nof_counters(self):
-        source = {"source_id": "gnb1", "gnb_id": "gnb-1", "ws_url": "ws://127.0.0.1:5001"}
-        payload = {
-            "timestamp": "2026-04-14T10:00:00+00:00",
-            "cells": [
-                {
+                    "cell_metrics": {"pci": 123},
                     "ue_list": [
                         {
                             "ue": "ueA",
-                            "dl_brate": 1000.0,
-                            "ul_brate": 500.0,
+                            "dl_brate": 2_000_000.0,
+                            "ul_brate": 1_000_000.0,
                             "dl_nof_nok": 10,
                             "dl_nof_ok": 90,
-                        }
-                    ]
-                }
-            ],
-        }
-
-        event = enrich_event(source, payload)
-
-        self.assertAlmostEqual(event["bler_pct"], 10.0, places=1)
-
-    def test_enrich_event_derives_bler_pct_from_legacy_retx_counters(self):
-        source = {"source_id": "gnb1", "gnb_id": "gnb-1", "ws_url": "ws://127.0.0.1:5001"}
-        payload = {
-            "timestamp": "2026-04-14T10:00:00+00:00",
-            "cells": [
-                {
-                    "ue_list": [
+                        },
                         {
-                            "ue": "ueA",
-                            "dl_brate": 1000.0,
-                            "ul_brate": 500.0,
-                            "dl_retx": 5,
-                            "dl_ok": 95,
-                        }
-                    ]
+                            "ue": "ueB",
+                            "dl_brate": 5_000_000.0,
+                            "ul_brate": 2_500_000.0,
+                        },
+                    ],
                 }
             ],
         }
 
         event = enrich_event(source, payload)
 
-        self.assertAlmostEqual(event["bler_pct"], 5.0, places=1)
+        for derived_key in ("cell_id", "ue_id", "throughput_mbps", "bler_pct"):
+            self.assertNotIn(derived_key, event)
 
-    def test_enrich_event_no_throughput_when_no_brate(self):
+    def test_enrich_event_passes_through_top_level_contract_fields(self):
+        # The pass-through path is the Phase-2 hook: when E2SM-KPM delivers
+        # KPIs already scoped to a (cell, UE) pair, they ride through unchanged.
         source = {"source_id": "gnb1", "gnb_id": "gnb-1", "ws_url": "ws://127.0.0.1:5001"}
         payload = {
             "timestamp": "2026-04-14T10:00:00+00:00",
-            "cells": [{"ue_list": [{"ue": "ueA"}]}],
+            "cell_id": 123,
+            "ue_id": "ueA",
+            "throughput_mbps": 3.0,
+            "bler_pct": 10.0,
+            "latency_ms": 4.2,
+            "prb_usage_pct": 55.5,
+            "rsrp_dbm": -85.0,
+            "cells": [{"cell_metrics": {"pci": 123}, "ue_list": [{"ue": "ueA"}]}],
         }
 
         event = enrich_event(source, payload)
 
-        self.assertNotIn("throughput_mbps", event)
-        self.assertNotIn("bler_pct", event)
+        self.assertEqual(event["cell_id"], 123)
+        self.assertEqual(event["ue_id"], "ueA")
+        self.assertAlmostEqual(event["throughput_mbps"], 3.0)
+        self.assertAlmostEqual(event["bler_pct"], 10.0)
+        self.assertAlmostEqual(event["latency_ms"], 4.2)
+        self.assertAlmostEqual(event["prb_usage_pct"], 55.5)
+        self.assertAlmostEqual(event["rsrp_dbm"], -85.0)
 
     def test_enrich_event_adds_schema_and_default_event_type(self):
         source = {
@@ -230,8 +214,6 @@ class EventWriterRotationTests(unittest.TestCase):
         self.assertEqual(event["metric_family"], "cells")
         self.assertEqual(event["event_type"], "metric")
         self.assertEqual(event["schema_version"], METRICS_SCHEMA_VERSION)
-        self.assertEqual(event["cell_id"], 123)
-        self.assertEqual(event["ue_id"], "ueA")
 
     def test_enrich_event_preserves_supported_payload_event_type(self):
         source = {
