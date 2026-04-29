@@ -1,14 +1,16 @@
 # Python
 *.pyc
+__pycache__/
 **/__pycache__/
 *.egg-info/
 src/.venv/
 
 # Runtime data
-metrics/*.jsonl
-metrics/*.jsonl.*
+/metrics/*
+!/metrics/.gitkeep
 *.sqlite
 var/
+src/.launch_stack_runtime/
 
 # Vendored srsRAN build tree (built locally, not tracked)
 src/srsRAN_Project/
