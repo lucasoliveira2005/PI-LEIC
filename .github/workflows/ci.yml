@@ -1,0 +1,213 @@
+name: CI
+
+on:
+  push:
+  pull_request:
+
+jobs:
+  test:
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package in editable mode
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Shell syntax checks
+        run: |
+          bash -n src/launch_stack.sh
+          bash -n src/launch_lib/common.sh
+          bash -n src/launch_lib/root_runtime.sh
+          bash -n src/launch_lib/journal_helpers.sh
+          bash -n src/launch_lib/socket_probes.sh
+          bash -n src/launch_lib/process_management.sh
+          bash -n src/launch_lib/core_readiness.sh
+          bash -n src/launch_lib/health_classification.sh
+          bash -n src/launch_lib/metrics_contract.sh
+          bash -n src/launch_lib/health_checks.sh
+          bash -n src/validate_stage.sh
+          bash -n tests/test_launch_lib_common.sh
+          bash -n tests/test_launch_lib_health_classification.sh
+          bash -n tests/test_launch_lib_journal_helpers.sh
+          bash -n tests/test_launch_lib_socket_probes.sh
+          bash -n tests/test_launch_lib_process_management.sh
+          bash -n tests/test_launch_lib_root_runtime.sh
+          bash -n tests/test_launch_lib_core_readiness.sh
+          bash -n tests/test_launch_lib_metrics_contract.sh
+          bash -n tests/test_launch_stack_dry_run_rootless.sh
+          bash -n tests/test_validate_stage_rootless.sh
+
+      - name: Rootless shell behavior tests
+        run: |
+          bash tests/test_launch_lib_common.sh
+          bash tests/test_launch_lib_health_classification.sh
+          bash tests/test_launch_lib_journal_helpers.sh
+          bash tests/test_launch_lib_socket_probes.sh
+          bash tests/test_launch_lib_process_management.sh
+          bash tests/test_launch_lib_root_runtime.sh
+          bash tests/test_launch_lib_core_readiness.sh
+          bash tests/test_launch_lib_metrics_contract.sh
+          bash tests/test_launch_stack_dry_run_rootless.sh
+          bash tests/test_validate_stage_rootless.sh
+
+      - name: Python syntax checks
+        run: |
+          python -m py_compile src/env_utils.py
+          python -m py_compile src/shared/env_utils.py
+          python -m py_compile src/shared/identity.py
+          python -m py_compile src/shared/liveness.py
+          python -m py_compile src/shared/structured_logging.py
+          python -m py_compile src/metrics_api.py
+          python -m py_compile src/metrics_liveness.py
+          python -m py_compile src/metrics_rest_api.py
+          python -m py_compile src/api_models.py
+          python -m py_compile src/metrics_identity.py
+          python -m py_compile src/metrics_collector.py
+          python -m py_compile src/collector/config.py
+          python -m py_compile src/collector/enrichment.py
+          python -m py_compile src/collector/transport.py
+          python -m py_compile src/collector/storage.py
+          python -m py_compile src/collector/worker.py
+          python -m py_compile src/dashboard.py
+          python -m py_compile src/provision_subscribers.py
+          python -m py_compile agent/agent.py
+
+      - name: Lint with ruff
+        run: |
+          pip install ruff
+          ruff check src/ tests/ agent/ --select E,F --ignore E501
+
+      - name: Unit tests
+        run: |
+          python -m unittest discover -s tests -p "test_*.py" -v
+
+  api_smoke:
+    runs-on: ubuntu-latest
+    needs: test
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+
+      - name: Install package in editable mode
+        run: |
+          python -m pip install --upgrade pip
+          python -m pip install -e .
+
+      - name: Seed synthetic JSONL fixture
+        run: |
+          mkdir -p metrics var
+          python - <<'PY'
+          import json, time
+          from datetime import datetime, timezone
+
+          now_iso = datetime.now(timezone.utc).isoformat()
+          stale_iso = "2000-01-01T00:00:00+00:00"
+
+          def cells_event(source_id, ts, pci, ue, dl, ul, sequence):
+              return {
+                  "source_id": source_id,
+                  "metric_family": "cells",
+                  "event_type": "metric",
+                  "schema_version": "1.0",
+                  "sequence": sequence,
+                  "timestamp": ts,
+                  "collector_timestamp": ts,
+                  "raw_payload": {
+                      "timestamp": ts,
+                      "cells": [
+                          {
+                              "cell_metrics": {"pci": pci},
+                              "ue_list": [
+                                  {"ue": ue, "dl_brate": dl, "ul_brate": ul, "pusch_snr_db": 17.5}
+                              ],
+                          }
+                      ],
+                  },
+              }
+
+          events = [
+              cells_event("gnb1", now_iso,   pci=10, ue="ue1", dl=5_000_000, ul=2_500_000, sequence=1),
+              cells_event("gnb1", now_iso,   pci=10, ue="ue1", dl=6_000_000, ul=3_000_000, sequence=2),
+              cells_event("gnb2", stale_iso, pci=11, ue="ue2", dl=0,          ul=0,          sequence=1),
+          ]
+
+          with open("metrics/gnb_metrics.jsonl", "w", encoding="utf-8") as f:
+              for e in events:
+                  f.write(json.dumps(e, ensure_ascii=False) + "\n")
+          PY
+
+      - name: Boot REST API against fixture
+        env:
+          METRICS_OUT: metrics/gnb_metrics.jsonl
+          METRICS_SQLITE_ENABLED: "0"
+          API_AUDIT_DB_PATH: var/pi-leic-api-audit.sqlite
+          API_PORT: "8000"
+          ALERT_STALE_AFTER_SECONDS: "30"
+          METRICS_SNAPSHOT_TTL_SECONDS: "0"
+        run: |
+          nohup python src/metrics_rest_api.py > var/api.log 2>&1 &
+          echo $! > var/api.pid
+          for i in $(seq 1 40); do
+            if curl -fsS http://127.0.0.1:8000/health >/dev/null 2>&1; then
+              echo "API is up after ${i} tries"
+              exit 0
+            fi
+            sleep 0.5
+          done
+          echo "API failed to come up — log tail:" >&2
+          tail -n 200 var/api.log >&2 || true
+          exit 1
+
+      - name: Verify /metrics responds with snapshot
+        run: |
+          body=$(curl -fsS http://127.0.0.1:8000/metrics)
+          echo "$body" | python -c "import json,sys; d=json.load(sys.stdin); assert d['mode']=='latest-snapshot', d; assert d['count']>=2, d; print('ok count=', d['count'])"
+
+      - name: Verify /alerts returns stale-source alert
+        run: |
+          body=$(curl -fsS "http://127.0.0.1:8000/alerts?status=open")
+          echo "$body" | python -c "import json,sys; d=json.load(sys.stdin); types=[i.get('type') for i in d['items']]; assert 'stale-source' in types, d; print('stale-source present')"
+
+      - name: Verify /metrics_prom emits exposition and does not mutate alert lifecycle
+        run: |
+          before=$(curl -fsS "http://127.0.0.1:8000/alerts?status=all" | python -c "import json,sys; print(len(json.load(sys.stdin)['items']))")
+          curl -fsS http://127.0.0.1:8000/metrics_prom > var/prom.txt
+          grep -q '^# TYPE gnb_source_fresh gauge$' var/prom.txt
+          grep -q '^# TYPE gnb_ue_dl_brate_bps gauge$' var/prom.txt
+          grep -q '^gnb_alerts_open{type="stale-source"} ' var/prom.txt
+          for _ in 1 2 3; do curl -fsS http://127.0.0.1:8000/metrics_prom > /dev/null; done
+          after=$(curl -fsS "http://127.0.0.1:8000/alerts?status=all" | python -c "import json,sys; print(len(json.load(sys.stdin)['items']))")
+          if [ "$before" != "$after" ]; then
+            echo "Alert count changed after Prometheus scrapes: before=$before after=$after" >&2
+            exit 1
+          fi
+          echo "Prometheus scrapes preserved alert lifecycle (count=$before)"
+
+      - name: Stop API
+        if: always()
+        run: |
+          if [ -f var/api.pid ]; then
+            kill "$(cat var/api.pid)" 2>/dev/null || true
+          fi
+
+      - name: Upload API log on failure
+        if: failure()
+        uses: actions/upload-artifact@v4
+        with:
+          name: api-smoke-log
+          path: var/api.log

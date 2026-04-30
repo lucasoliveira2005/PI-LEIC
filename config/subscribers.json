@@ -1,0 +1,28 @@
+[
+  {
+    "subscriber_id": "ue1",
+    "imsi": "999700000000001",
+    "imei": "356938035643803",
+    "k": "465B5CE8B199B49FAA5F0A2EE238A6BC",
+    "opc": "E8ED289DEBA952E4283B54E88E6183CA",
+    "apn": "internet",
+    "sst": 1,
+    "sd": null,
+    "netns": "ue1",
+    "ue_config": "config/ue1_zmq.conf.txt",
+    "source_id": "gnb1"
+  },
+  {
+    "subscriber_id": "ue2",
+    "imsi": "999700000000002",
+    "imei": "356938035643804",
+    "k": "465B5CE8B199B49FAA5F0A2EE238A6BC",
+    "opc": "E8ED289DEBA952E4283B54E88E6183CA",
+    "apn": "internet",
+    "sst": 1,
+    "sd": null,
+    "netns": "ue2",
+    "ue_config": "config/ue2_zmq.conf.txt",
+    "source_id": "gnb2"
+  }
+]

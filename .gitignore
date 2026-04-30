@@ -1,4 +1,22 @@
+# Python
+*.pyc
+__pycache__/
+**/__pycache__/
+*.egg-info/
+src/.venv/
+
+# Runtime data
 /metrics/*
 !/metrics/.gitkeep
+*.sqlite
+var/
+src/.launch_stack_runtime/
 
-__pycache__/
+# Vendored srsRAN build tree (built locally, not tracked)
+src/srsRAN_Project/
+
+# Editor/scratch
+.vscode/
+.idea/
+*.swp
+test_subshell.sh

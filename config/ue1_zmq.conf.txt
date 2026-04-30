@@ -1,7 +1,3 @@
-# DEPRECATED: Single-UE reference configuration.
-# Superseded by ue1_zmq.conf.txt and ue2_zmq.conf.txt for the multi-gNB testbed.
-# Not referenced by any runtime code. Kept here as a reference baseline only.
-
 [rf]
 freq_offset = 0
 tx_gain = 50
@@ -24,15 +20,15 @@ nof_prb = 106
 
 [pcap]
 enable = none
-mac_filename = /tmp/ue_mac.pcap
-mac_nr_filename = /tmp/ue_mac_nr.pcap
-nas_filename = /tmp/ue_nas.pcap
+mac_filename = /tmp/ue1_mac.pcap
+mac_nr_filename = /tmp/ue1_mac_nr.pcap
+nas_filename = /tmp/ue1_nas.pcap
 
 [log]
 all_level = warning
 phy_lib_level = none
 all_hex_limit = 32
-filename = /tmp/ue.log
+filename = /tmp/ue1.log
 file_max_size = -1
 
 [usim]
