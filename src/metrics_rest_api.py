@@ -254,6 +254,67 @@ def _snapshot_summary(snapshot: Dict[str, Dict[str, Any]]) -> Dict[str, Any]:
     }
 
 
+def _latest_snapshot_entities(snapshot: Dict[str, Dict[str, Any]]) -> List[Dict[str, Any]]:
+    entities: List[Dict[str, Any]] = []
+    for source_id in sorted(snapshot.keys()):
+        source_entry = snapshot[source_id]
+        for entity in source_entry.get("entities") or []:
+            if isinstance(entity, dict):
+                entities.append({"source_id": source_id, **entity})
+    return entities
+
+
+def _summarize_query_answer(question: str, snapshot: Dict[str, Dict[str, Any]]) -> str:
+    summary = _snapshot_summary(snapshot)
+    entities = _latest_snapshot_entities(snapshot)
+    question_lower = question.lower()
+
+    if summary["sources"] == 0:
+        return "Ainda não tenho métricas suficientes para responder com confiança."
+
+    if any(term in question_lower for term in ("quant", "how many", "count", "ue")):
+        return f"Neste momento vejo {summary['sources']} fonte(s) e {summary['entities']} entidade(s) UE. Se quiseres, detalho por fonte ou por célula."
+
+    if "lat" in question_lower:
+        return f"Neste momento tenho {summary['sources']} fonte(s) e {summary['entities']} entidade(s) UE, mas a latência não aparece de forma uniforme em todos os samples. Se quiseres, mostro-te as entidades mais recentes por fonte."
+
+    if any(term in question_lower for term in ("sinr", "sinal")):
+        snr_values = [
+            float(entity.get("ue", {}).get("pusch_snr_db"))
+            for entity in entities
+            if isinstance(entity.get("ue"), dict) and isinstance(entity.get("ue", {}).get("pusch_snr_db"), (int, float))
+        ]
+        if snr_values:
+            avg_snr = sum(snr_values) / len(snr_values)
+            return f"Neste momento o uplink mostra SINR médio de {avg_snr:.2f} dB em {len(snr_values)} entidade(s). No total, vejo {summary['sources']} fonte(s) e {summary['entities']} entidade(s) UE."
+
+    if any(term in question_lower for term in ("throughput", "débito", "debito")):
+        dl_values = [
+            float(entity.get("ue", {}).get("dl_brate"))
+            for entity in entities
+            if isinstance(entity.get("ue"), dict) and isinstance(entity.get("ue", {}).get("dl_brate"), (int, float))
+        ]
+        ul_values = [
+            float(entity.get("ue", {}).get("ul_brate"))
+            for entity in entities
+            if isinstance(entity.get("ue"), dict) and isinstance(entity.get("ue", {}).get("ul_brate"), (int, float))
+        ]
+        if dl_values or ul_values:
+            parts = []
+            if dl_values:
+                parts.append(f"DL médio {sum(dl_values) / len(dl_values):.1f}")
+            if ul_values:
+                parts.append(f"UL médio {sum(ul_values) / len(ul_values):.1f}")
+            return f"Neste momento vejo {', '.join(parts)} nas UE disponíveis. No total, tenho {summary['sources']} fonte(s) e {summary['entities']} entidade(s) UE."
+
+    latest_source_id = sorted(snapshot.keys())[-1]
+    latest_source = snapshot[latest_source_id]
+    latest_entities = latest_source.get("entities") or []
+    latest_timestamp = latest_source.get("timestamp") or latest_source.get("collector_timestamp") or "timestamp indisponível"
+
+    return f"Neste momento tenho {summary['sources']} fonte(s) e {summary['entities']} entidade(s) UE. A fonte mais recente é {latest_source_id} ({latest_timestamp}) com {len(latest_entities)} entidade(s)."
+
+
 # ── Section: Audit DB ─────────────────────────────────────────────────────────
 
 
@@ -1048,25 +1109,14 @@ def post_query(payload: QueryRequest) -> Dict[str, Any]:
     snapshot, _ = _cached_snapshot()
     summary = _snapshot_summary(snapshot)
     question = payload.question.strip()
-    question_lower = question.lower()
-
-    if "lat" in question_lower:
-        answer = (
-            "Latency-specific KPI is not currently exported as a dedicated field in all samples; "
-            "latest per-source entities are available for contextual inspection."
-        )
-    else:
-        answer = (
-            f"Latest snapshot covers {summary['sources']} source(s) and "
-            f"{summary['entities']} UE entity sample(s)."
-        )
+    answer = _summarize_query_answer(question, snapshot)
 
     response = {
         "schema_version": API_SCHEMA_VERSION,
         "request_id": request_id,
-        "status": "answered_stub",
+        "status": "answered",
         "mode": QUERY_BACKEND_MODE,
-        "reason_code": "llm_not_integrated",
+        "reason_code": "snapshot_summary",
         "question": question,
         "answer": answer,
         "time_reference": datetime.now(timezone.utc).isoformat(),

@@ -42,7 +42,7 @@ HEALTHCHECK_UE_FAILURE_REGEX="${HEALTHCHECK_UE_FAILURE_REGEX:-Registration rejec
 HEALTHCHECK_AMF_FAILURE_REGEX="${HEALTHCHECK_AMF_FAILURE_REGEX:-HTTP response error \\[(status:)?5[0-9][0-9]\\]|Cannot discover \\[[^]]+\\]|Registration reject}"
 HEALTHCHECK_TIMEOUT_SECONDS="${HEALTHCHECK_TIMEOUT_SECONDS:-30}"
 HEALTHCHECK_POLL_SECONDS="${HEALTHCHECK_POLL_SECONDS:-1}"
-CORE_READINESS_TIMEOUT_SECONDS="${CORE_READINESS_TIMEOUT_SECONDS:-45}"
+CORE_READINESS_TIMEOUT_SECONDS="${CORE_READINESS_TIMEOUT_SECONDS:-120}"
 CORE_READINESS_POLL_SECONDS="${CORE_READINESS_POLL_SECONDS:-1}"
 CORE_READINESS_STABLE_POLLS="${CORE_READINESS_STABLE_POLLS:-3}"
 CORE_READINESS_REQUIRE_LOG_MARKERS="${CORE_READINESS_REQUIRE_LOG_MARKERS:-1}"
@@ -365,7 +365,20 @@ prepare_python_env() {
   mkdir -p "$MPLCONFIGDIR_PATH"
 
   if [[ ! -d "$VENV_DIR_PATH" ]]; then
-    "$PYTHON_BIN_RESOLVED" -m venv "$VENV_DIR_PATH"
+    if ! "$PYTHON_BIN_RESOLVED" -m venv "$VENV_DIR_PATH"; then
+      cat >&2 <<'EOF'
+Failed to create the Python virtual environment.
+
+On Debian/Ubuntu this usually means the `python3-venv` package is missing.
+
+Install it with:
+  sudo apt install python3-venv
+
+If your system Python is version-specific, you may need the matching package,
+for example `python3.10-venv`.
+EOF
+      exit 1
+    fi
   fi
 
   if ! "$VENV_DIR_PATH/bin/python" -c 'import matplotlib, websocket, fastapi, uvicorn' >/dev/null 2>&1; then
@@ -554,10 +567,29 @@ start_supervised_stack() {
     "$(user_unit_name "metrics-collector")"
   )
 
+  # Restart only the core units that have a corresponding config file under
+  # /etc/open5gs. This avoids starting services (MME/SGW etc.) on systems where
+  # those configuration files are missing.
+  filtered_core_units=()
+  for unit in "${CORE_UNITS[@]}"; do
+    base="${unit#open5gs-}"
+    base="${base%d}"
+    cfg="/etc/open5gs/${base}.yaml"
+    if [[ -f "$cfg" ]]; then
+      filtered_core_units+=("$unit")
+    else
+      echo "Skipping $unit: missing $cfg"
+    fi
+  done
+
   if [[ "$DRY_RUN" == "1" ]]; then
-    echo "Would restart core services: $(join_by ' ' "${CORE_UNITS[@]}")"
+    echo "Would restart core services: $(join_by ' ' "${filtered_core_units[@]}")"
   else
-    sudo -n systemctl restart "${CORE_UNITS[@]}"
+    if [[ ${#filtered_core_units[@]} -gt 0 ]]; then
+      sudo -n systemctl restart "${filtered_core_units[@]}"
+    else
+      echo "No core units to restart: no Open5GS config files found under /etc/open5gs"
+    fi
   fi
 
   wait_for_core_readiness "$amf_log_start_line" "$smf_log_start_line" "$upf_log_start_line"
@@ -668,7 +700,7 @@ start_supervised_stack() {
   fi
 
   echo "Started supervised stack from: $WORKDIR"
-  echo "Core services restarted: $(join_by ', ' "${CORE_UNITS[@]}")"
+  echo "Core services restarted: $(join_by ', ' "${filtered_core_units[@]:-${CORE_UNITS[@]}}")"
   echo "Root units: $(join_by ', ' "${ROOT_UNIT_NAMES[@]}")"
   echo "User units: $(join_by ', ' "${HEALTHCHECK_USER_UNITS[@]}")"
   echo "Use '$0 --status' for status or '$0 --logs collector' to inspect logs."
@@ -889,6 +921,8 @@ if [[ ! -d "$WORKDIR" ]]; then
 fi
 
 WORKDIR="$(cd -- "$WORKDIR" && pwd)"
+# Look for venv in this order: VENV_DIR env var, VIRTUAL_ENV, parent dir (.venv), or src dir (.venv)
+VENV_DIR="${VENV_DIR:-${VIRTUAL_ENV:-$(cd "$WORKDIR/.." && [ -d .venv ] && pwd)/.venv}}"
 VENV_DIR="${VENV_DIR:-$WORKDIR/.venv}"
 
 PYTHON_BIN_RESOLVED="$(resolve_executable "$PYTHON_BIN")"

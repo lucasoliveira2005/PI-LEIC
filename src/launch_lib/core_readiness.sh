@@ -18,12 +18,16 @@ core_readiness_wait_for_core_readiness() {
   local deadline
   local stable_polls=0
   local -a inactive_units=()
+  local -a failed_units=()
   local -a missing_markers=()
   local -a missing_socket_probes=()
   local -a missing_endpoint_probes=()
   local unit
+  local unit_result
+  local unit_status
   local core_failure_line
   local socket_snapshot
+  local -a required_core_units=(open5gs-amfd open5gs-smfd open5gs-upfd)
 
   if [[ "${DRY_RUN:-0}" == "1" ]]; then
     echo "Would wait up to ${timeout_seconds}s for dynamic Open5GS core readiness checks."
@@ -31,9 +35,9 @@ core_readiness_wait_for_core_readiness() {
   fi
 
   if declare -p CORE_UNITS >/dev/null 2>&1; then
-    core_units=("${CORE_UNITS[@]}")
+    core_units=("${required_core_units[@]}")
   else
-    core_units=(open5gs-amfd open5gs-smfd open5gs-upfd)
+    core_units=("${required_core_units[@]}")
   fi
 
   deadline=$((SECONDS + timeout_seconds))
@@ -83,8 +87,21 @@ core_readiness_wait_for_core_readiness() {
     for unit in "${core_units[@]}"; do
       if ! sudo -n systemctl is-active --quiet "$unit" >/dev/null 2>&1; then
         inactive_units+=("$unit")
+
+        unit_result="$(sudo -n systemctl show "$unit" --property=Result --value 2>/dev/null || true)"
+        unit_status="$(sudo -n systemctl show "$unit" --property=ExecMainStatus --value 2>/dev/null || true)"
+        if [[ "$unit_result" == "exit-code" && "$unit_status" == "127" ]]; then
+          failed_units+=("$unit")
+        fi
       fi
     done
+
+    if [[ ${#failed_units[@]} -gt 0 ]]; then
+      echo "Open5GS services are crashing at startup: $(join_by ', ' "${failed_units[@]}")"
+      echo "This usually means the installed Open5GS binaries and libraries are out of sync."
+      echo "Check the system Open5GS packages before retrying launch_stack.sh."
+      return 1
+    fi
 
     if [[ "$marker_checks_enabled" == "1" ]]; then
       if ! journal_helpers_root_file_contains_pattern_since_line "$core_amf_log_path" "$amf_start_line" 'ngap_server|sbi_server'; then
@@ -93,7 +110,11 @@ core_readiness_wait_for_core_readiness() {
       if ! journal_helpers_root_file_contains_pattern_since_line "$core_smf_log_path" "$smf_start_line" 'pfcp_server|gtp_connect|sbi_server'; then
         missing_markers+=("smf")
       fi
-      if [[ "$smf_amf_assoc_checks_enabled" == "1" ]] && ! journal_helpers_root_file_contains_pattern_since_line "$core_smf_log_path" "$smf_start_line" '\[AMF\] NFInstance associated|\[namf-comm\] NFService associated'; then
+      # Check AMF logs for SMF registration/association markers. The AMF
+      # log contains lines like "[SMF] NFInstance associated" and
+      # "NFService associated" when an SMF instance associates, so inspect
+      # the AMF log file (not the SMF log file).
+      if [[ "$smf_amf_assoc_checks_enabled" == "1" ]] && ! journal_helpers_root_file_contains_pattern_since_line "$core_amf_log_path" "$amf_start_line" 'NFInstance associated|NFService associated'; then
         missing_markers+=("smf-amf-association")
       fi
       if ! journal_helpers_root_file_contains_pattern_since_line "$core_upf_log_path" "$upf_start_line" 'pfcp_server|gtpu_server'; then

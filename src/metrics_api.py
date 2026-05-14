@@ -274,10 +274,10 @@ class MetricsLogReader:
         for entry in self.iter_events():
             source_id = entry.get("source_id", "single")
             payload = extract_payload(entry)
+            if not isinstance(payload, dict):
+                continue
 
             entities = extract_cell_ue_entities(payload)
-            if not entities:
-                continue
 
             sequence_by_source[source_id] = sequence_by_source.get(source_id, 0) + 1
 
@@ -328,7 +328,7 @@ class MetricsLogReader:
             FROM source_aggregates AS sa
             JOIN metrics_events AS e
               ON e.id = sa.latest_id
-            JOIN metrics_cell_entities AS ce
+                        LEFT JOIN metrics_cell_entities AS ce
               ON ce.event_id = e.id
             ORDER BY e.source_id, ce.cell_index, ce.ue_index
         """
@@ -360,6 +360,11 @@ class MetricsLogReader:
                     "entities": [],
                 },
             )
+
+            if cell_index is None or ue_index is None:
+                # Keep source visibility/freshness even when the latest cells
+                # sample has zero UE entities.
+                continue
 
             try:
                 ue_metrics = json.loads(ue_json) if ue_json else {}
@@ -408,12 +413,6 @@ class MetricsLogReader:
         sequences = {}
         for event in self.iter_events():
             source_id = event.get("source_id", "single")
-            payload = extract_payload(event)
-
-            entities = extract_cell_ue_entities(payload)
-            if not entities:
-                continue
-
             sequences[source_id] = sequences.get(source_id, 0) + 1
 
         return sequences
@@ -429,3 +428,93 @@ class MetricsLogReader:
             sample_epochs[source_id] = sample_epoch
 
         return sample_epochs
+
+    def _latest_event_payload_by_source_from_jsonl(
+        self,
+        metric_family: Optional[str] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        latest_by_source: Dict[str, Dict[str, Any]] = {}
+
+        for entry in self.iter_events():
+            source_id = str(entry.get("source_id", "single"))
+            entry_family = entry.get("metric_family")
+            if metric_family is not None and entry_family != metric_family:
+                continue
+
+            payload = extract_payload(entry)
+            if not isinstance(payload, dict):
+                continue
+
+            latest_by_source[source_id] = {
+                "timestamp": entry.get("timestamp") or payload.get("timestamp") or entry.get("collector_timestamp"),
+                "collector_timestamp": entry.get("collector_timestamp"),
+                "metric_family": entry_family,
+                "payload": payload,
+            }
+
+        return latest_by_source
+
+    def _latest_event_payload_by_source_from_sqlite(
+        self,
+        metric_family: Optional[str] = None,
+    ) -> Optional[Dict[str, Dict[str, Any]]]:
+        if not self.sqlite_path or not self.sqlite_path.exists():
+            return None
+
+        query = """
+            WITH source_aggregates AS (
+                SELECT
+                    source_id,
+                    MAX(id) AS latest_id
+                FROM metrics_events
+                WHERE (? IS NULL OR metric_family = ?)
+                GROUP BY source_id
+            )
+            SELECT
+                e.source_id,
+                e.event_timestamp,
+                e.collector_timestamp,
+                e.metric_family,
+                e.raw_json
+            FROM source_aggregates AS sa
+            JOIN metrics_events AS e
+              ON e.id = sa.latest_id
+            ORDER BY e.source_id
+        """
+
+        try:
+            with sqlite3.connect(str(self.sqlite_path)) as conn:
+                rows = conn.execute(query, (metric_family, metric_family)).fetchall()
+        except sqlite3.Error:
+            return None
+
+        latest_by_source: Dict[str, Dict[str, Any]] = {}
+        for source_id, event_timestamp, collector_timestamp, entry_family, raw_json in rows:
+            try:
+                raw_entry = json.loads(raw_json) if raw_json else {}
+            except json.JSONDecodeError:
+                raw_entry = {}
+
+            payload = extract_payload(raw_entry) if isinstance(raw_entry, dict) else {}
+            if not isinstance(payload, dict):
+                payload = {}
+
+            latest_by_source[str(source_id)] = {
+                "timestamp": event_timestamp or collector_timestamp,
+                "collector_timestamp": collector_timestamp,
+                "metric_family": entry_family,
+                "payload": payload,
+            }
+
+        return latest_by_source
+
+    def latest_event_payload_by_source(
+        self,
+        metric_family: Optional[str] = None,
+    ) -> Dict[str, Dict[str, Any]]:
+        if self.prefer_sqlite:
+            latest_from_sqlite = self._latest_event_payload_by_source_from_sqlite(metric_family)
+            if latest_from_sqlite:
+                return latest_from_sqlite
+
+        return self._latest_event_payload_by_source_from_jsonl(metric_family)

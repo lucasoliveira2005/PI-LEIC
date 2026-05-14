@@ -35,6 +35,9 @@ _reader_error_reported: bool = False
 history_by_entity: Dict[Tuple, Dict[str, List]] = {}
 last_sample_signature_by_entity: Dict[Tuple, str] = {}
 entity_colors: Dict[Tuple, str] = {}
+history_by_source: Dict[str, Dict[str, List]] = {}
+last_sample_signature_by_source: Dict[str, str] = {}
+source_colors: Dict[str, str] = {}
 palette: List[str] = [
     "tab:blue",
     "tab:orange",
@@ -49,6 +52,12 @@ def get_entity_color(entity_key):
     if entity_key not in entity_colors:
         entity_colors[entity_key] = palette[len(entity_colors) % len(palette)]
     return entity_colors[entity_key]
+
+
+def get_source_color(source_id: str) -> str:
+    if source_id not in source_colors:
+        source_colors[source_id] = palette[len(source_colors) % len(palette)]
+    return source_colors[source_id]
 
 
 def entity_label(entity_key):
@@ -98,6 +107,42 @@ def append_entity_sample(entity_key, ue_metrics):
         history["signal_values"].pop(0)
 
 
+def append_source_sample(source_id: str, du_low_payload: Dict[str, Any]):
+    history = history_by_source.setdefault(
+        source_id,
+        {
+            "times": [],
+            "dl_rates": [],
+            "ul_rates": [],
+            "signal_values": [],
+            "dl_latency_us": [],
+        },
+    )
+
+    dl = du_low_payload.get("dl") if isinstance(du_low_payload.get("dl"), dict) else {}
+    ul = du_low_payload.get("ul") if isinstance(du_low_payload.get("ul"), dict) else {}
+    ul_eff = ul.get("algo_efficiency") if isinstance(ul.get("algo_efficiency"), dict) else {}
+    dl_fec = dl.get("fec") if isinstance(dl.get("fec"), dict) else {}
+
+    dl_tput = dl.get("average_throughput_mbps")
+    if dl_tput is None:
+        dl_tput = dl_fec.get("average_throughput_mbps")
+
+    next_time = history["times"][-1] + 1 if history["times"] else 0
+    history["times"].append(next_time)
+    history["dl_rates"].append(float(dl_tput or 0.0))
+    history["ul_rates"].append(float(ul.get("average_throughput_mbps", 0.0) or 0.0))
+    history["signal_values"].append(float(ul_eff.get("sinr_db", 0.0) or 0.0))
+    history["dl_latency_us"].append(float(dl.get("average_latency_us", 0.0) or 0.0))
+
+    if len(history["times"]) > 50:
+        history["times"].pop(0)
+        history["dl_rates"].pop(0)
+        history["ul_rates"].pop(0)
+        history["signal_values"].pop(0)
+        history["dl_latency_us"].pop(0)
+
+
 def build_entity_sample_signature(latest_timestamp, ue_metrics):
     if latest_timestamp not in (None, ""):
         return f"ts:{latest_timestamp}"
@@ -115,14 +160,16 @@ def animate(_):
 
     try:
         latest_by_source = READER.latest_cells_by_source()
+        latest_du_low_by_source = READER.latest_event_payload_by_source("du_low")
     except Exception as exc:  # noqa: BLE001
         if not _reader_error_reported:
             print(f"Failed to read latest metrics snapshot: {exc}", file=sys.stderr)
             _reader_error_reported = True
         latest_by_source = {}
+        latest_du_low_by_source = {}
 
     _reader_error_reported = False
-    if not latest_by_source:
+    if not latest_by_source and not latest_du_low_by_source:
         ax1.clear()
         ax2.clear()
         ax1.set_title("Performance de Dados em Tempo Real (5G NR)")
@@ -154,6 +201,28 @@ def animate(_):
             append_entity_sample(entity_key, ue_metrics)
             last_sample_signature_by_entity[entity_key] = sample_signature
 
+    for source_id, source_event in latest_du_low_by_source.items():
+        payload = source_event.get("payload") if isinstance(source_event, dict) else {}
+        if not isinstance(payload, dict):
+            continue
+
+        du_low_payload = payload.get("du_low") if isinstance(payload.get("du_low"), dict) else {}
+        if not du_low_payload and isinstance(payload.get("dl"), dict) and isinstance(payload.get("ul"), dict):
+            # Some events carry du_low as the root payload instead of nesting it.
+            du_low_payload = payload
+        if not du_low_payload:
+            continue
+
+        source_timestamp = source_event.get("timestamp")
+        source_signature = f"du_low:{source_timestamp}" if source_timestamp else (
+            "du_low_payload:" + json.dumps(du_low_payload, sort_keys=True, ensure_ascii=False)
+        )
+        if last_sample_signature_by_source.get(source_id) == source_signature:
+            continue
+
+        append_source_sample(source_id, du_low_payload)
+        last_sample_signature_by_source[source_id] = source_signature
+
     # Gráfico de Bitrate
     ax1.clear()
     for entity_key in sorted(history_by_entity):
@@ -175,9 +244,30 @@ def animate(_):
             linestyle="--",
             linewidth=2,
         )
+
+    if not history_by_entity:
+        for source_id in sorted(history_by_source):
+            history = history_by_source[source_id]
+            color = get_source_color(source_id)
+            ax1.plot(
+                history["times"],
+                history["dl_rates"],
+                label=f"{source_id} DL (du_low)",
+                color=color,
+                linewidth=2,
+            )
+            ax1.plot(
+                history["times"],
+                history["ul_rates"],
+                label=f"{source_id} UL (du_low)",
+                color=color,
+                linestyle="--",
+                linewidth=2,
+            )
+
     ax1.set_title("Performance de Dados em Tempo Real (5G NR)")
-    ax1.set_ylabel("kbps")
-    if history_by_entity:
+    ax1.set_ylabel("Mbps")
+    if history_by_entity or history_by_source:
         ax1.legend(loc='upper left')
     ax1.grid(True, alpha=0.3)
 
@@ -195,10 +285,24 @@ def animate(_):
             color=color,
             linewidth=2,
         )
+
+    if not history_by_entity:
+        for source_id in sorted(history_by_source):
+            history = history_by_source[source_id]
+            color = get_source_color(source_id)
+            ax2.fill_between(history["times"], history["signal_values"], color=color, alpha=0.15)
+            ax2.plot(
+                history["times"],
+                history["signal_values"],
+                label=f"{source_id} SINR (du_low)",
+                color=color,
+                linewidth=2,
+            )
+
     ax2.set_title("Qualidade do Sinal")
     ax2.set_ylabel("dB")
     ax2.set_xlabel("Amostras (segundos)")
-    if history_by_entity:
+    if history_by_entity or history_by_source:
         ax2.legend(loc='upper left')
     ax2.grid(True, alpha=0.3)
 
@@ -223,7 +327,7 @@ def main():
     plt.subplots_adjust(hspace=0.4)
 
     # Keep a module reference so the animation object is not garbage-collected.
-    ani = animation.FuncAnimation(fig, animate, interval=1000)
+    ani = animation.FuncAnimation(fig, animate, interval=1000, cache_frame_data=False)
 
     print(f"Monitorizando {LOG_FILE.resolve()}...")
     if LOG_INCLUDE_ROTATED:
