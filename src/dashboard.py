@@ -1,10 +1,8 @@
 #!/usr/bin/env python3
-"""DEPRECATED — kept only as a dev-time live view.
+"""Matplotlib live view for the local metrics PoC.
 
-Grafana (see `config/grafana/`) is the canonical visualization surface going
-forward. Do not add new views, panels, or features here; build them in
-Grafana instead. This module will be removed once the Grafana dashboard
-fully covers the demo flow.
+This is the browser-independent visualization surface used by the demo. It
+reads the same JSONL/SQLite metrics store as the REST API.
 """
 import json
 import os

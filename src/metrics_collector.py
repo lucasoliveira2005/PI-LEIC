@@ -4,7 +4,7 @@
 The real implementation lives in:
   src/collector/config.py      — environment-variable configuration
   src/collector/enrichment.py  — event enrichment and D1 contract field derivation
-  src/collector/transport.py   — WebSocket source adapter (E2SM-KPM sibling lands in Phase 1)
+  src/collector/transport.py   — WebSocket source adapter
   src/collector/storage.py     — JSONL rotation (EventWriter) and SQLite sink
   src/collector/worker.py      — source worker threads, watchdog, main()
 """

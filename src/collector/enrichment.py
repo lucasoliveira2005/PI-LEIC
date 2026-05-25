@@ -94,13 +94,10 @@ def extract_contract_fields(payload: Dict) -> Dict:
     cells/du/du_low payload is multi-UE/multi-cell, and any single value at the
     event level can only describe one entity. Per-UE truth lives inside
     ``raw_payload.cells[].ue_list[]`` and the denormalized ``metrics_cell_entities``
-    SQLite rows; consumers compute per-UE throughput/BLER from those (e.g.
-    ``/metrics_prom`` derives ``gnb_ue_throughput_mbps`` from ``dl_brate +
-    ul_brate`` per entity).
+    SQLite rows; consumers compute per-UE throughput/BLER from those snapshots.
 
-    The pass-through is kept as the Phase-2 hook: when the E2SM-KPM adapter
-    starts delivering KPIs that are already scoped to a (cell, UE) pair, those
-    fields will ride through unchanged at the event level.
+    The pass-through is kept as a compatibility hook for KPI payloads that are
+    already scoped to a (cell, UE) pair.
     """
     return {
         key: payload[key]

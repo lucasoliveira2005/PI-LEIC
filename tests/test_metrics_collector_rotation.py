@@ -162,8 +162,8 @@ class EventWriterRotationTests(unittest.TestCase):
             self.assertNotIn(derived_key, event)
 
     def test_enrich_event_passes_through_top_level_contract_fields(self):
-        # The pass-through path is the Phase-2 hook: when E2SM-KPM delivers
-        # KPIs already scoped to a (cell, UE) pair, they ride through unchanged.
+        # The pass-through path keeps payloads that already carry entity-scoped
+        # KPI fields compatible with the shared event contract.
         source = {"source_id": "gnb1", "gnb_id": "gnb-1", "ws_url": "ws://127.0.0.1:5001"}
         payload = {
             "timestamp": "2026-04-14T10:00:00+00:00",

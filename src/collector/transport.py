@@ -1,9 +1,8 @@
 """Transport adapters: WebSocket source connection.
 
 The current ingestion transport is WebSocket (srsRAN's JSON metrics server).
-The target transport for SC-RIC integration is E2AP/KPM — not ZMQ. A KPM
-adapter will be added in Phase 1; until then the factory only returns the
-WebSocket adapter. Do not add speculative transport implementations here.
+The factory only returns the WebSocket adapter for the local PoC. Do not add
+speculative transport implementations here.
 """
 
 from __future__ import annotations
@@ -89,8 +88,6 @@ class WebSocketSourceAdapter(SourceTransportAdapter):
 def build_transport_adapter(source: Dict[str, Any]) -> SourceTransportAdapter:
     """Build the transport adapter for *source*.
 
-    WebSocket is the only supported backend. The future E2SM KPM adapter
-    (Phase 1) will be added as a sibling subclass and this factory will gain
-    source-type dispatch at that point.
+    WebSocket is the only supported backend for the local PoC.
     """
     return WebSocketSourceAdapter(source)
