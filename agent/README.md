@@ -57,3 +57,14 @@ Se aparecer `comando 'ollama' não encontrado`:
 1. Reabre o terminal.
 2. Confirma com `ollama --version`.
 3. Se necessário, adiciona o binário ao PATH e tenta novamente.
+
+---
+
+# Criação do modelo personalizado
+
+(dei o nome de RANPilot)
+
+ollama create RANPilot -f Modelfile
+
+ollama run RANPilot   //para testar no terminal
+
