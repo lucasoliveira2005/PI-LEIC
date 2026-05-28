@@ -195,12 +195,21 @@ class MetricsRestApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
 
         payload = response.json()
-        self.assertEqual(payload["mode"], "latest-snapshot")
-        self.assertEqual(payload["transport"]["current"], "websocket")
-        self.assertEqual(payload["transport"]["mode"], "local-store")
-        self.assertNotIn("target", payload["transport"])
-        self.assertNotIn("target_platform", payload["transport"])
-        self.assertEqual(payload["count"], 2)
+        self.assertEqual(payload["schema_version"], "network-observation.v1")
+        self.assertEqual(payload["timestamp"], "2026-04-14T10:02:00+00:00")
+        self.assertEqual(
+            [cell["cell_id"] for cell in payload["cells"]],
+            ["gnb1-cell-0", "gnb2-cell-0"],
+        )
+        self.assertEqual(
+            [ue["cell_id"] for ue in payload["ues"]],
+            ["gnb1-cell-0", "gnb2-cell-0"],
+        )
+        self.assertAlmostEqual(payload["ues"][0]["throughput"]["dl_goodput_mbps"], 0.2)
+        self.assertAlmostEqual(payload["ues"][1]["throughput"]["dl_goodput_mbps"], 0.3)
+        self.assertNotIn("mode", payload)
+        self.assertNotIn("count", payload)
+        self.assertNotIn("transport", payload)
 
     def test_get_metrics_with_time_window_returns_event_window(self):
         self._write_events(
@@ -410,8 +419,10 @@ class MetricsRestApiTests(unittest.TestCase):
         self.assertEqual(response.status_code, 200)
 
         payload = response.json()
-        self.assertEqual(payload["count"], 1)
-        self.assertEqual(payload["items"][0]["source_id"], "gnb1")
+        self.assertEqual(payload["schema_version"], "network-observation.v1")
+        self.assertEqual([cell["cell_id"] for cell in payload["cells"]], ["gnb1-cell-0"])
+        self.assertEqual([ue["cell_id"] for ue in payload["ues"]], ["gnb1-cell-0"])
+        self.assertAlmostEqual(payload["ues"][0]["throughput"]["dl_goodput_mbps"], 0.1)
 
     def test_metrics_prom_endpoint_is_not_exposed(self):
         route_paths = {getattr(route, "path", None) for route in metrics_rest_api.app.routes}

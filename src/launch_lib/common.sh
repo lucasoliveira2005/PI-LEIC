@@ -74,11 +74,48 @@ read_ip_devname() {
   ' "$config_path"
 }
 
+read_ue_config() {
+  local config_path="$1"
+
+  awk -F '=' '
+    /^[[:space:]]*ue_config[[:space:]]*=/ {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+      print $2
+      exit
+    }
+  ' "$config_path"
+}
+
+read_veth_host_ip() {
+  local config_path="$1"
+
+  awk -F '=' '
+    /^[[:space:]]*veth_host_ip[[:space:]]*=/ {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+      print $2
+      exit
+    }
+  ' "$config_path"
+}
+
+read_veth_ns_ip() {
+  local config_path="$1"
+
+  awk -F '=' '
+    /^[[:space:]]*veth_ns_ip[[:space:]]*=/ {
+      gsub(/^[[:space:]]+|[[:space:]]+$/, "", $2)
+      print $2
+      exit
+    }
+  ' "$config_path"
+}
+
 config_label() {
   local label
 
   label="$(basename -- "$1")"
   label="${label%.yaml}"
+  label="${label%.conf}"
   label="${label%.conf.txt}"
   label="${label#gnb_}"
   label="${label%_zmq}"

@@ -7,8 +7,16 @@ src/.venv/
 # Runtime data
 metrics/*.jsonl
 metrics/*.jsonl.*
+metrics/**/*.jsonl
+metrics/**/*.jsonl.*
+metrics/**/*.log
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
 var/
+nr*_stats*.log
+src/nr*_stats*.log
+src/metrics/
 
 # Vendored srsRAN build tree (built locally, not tracked)
 src/srsRAN_Project/

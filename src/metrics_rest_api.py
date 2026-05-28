@@ -34,6 +34,7 @@ from env_utils import (
     parse_non_negative_float_env,
     parse_non_negative_int_env,
 )
+from collector.network_observation import network_observation_from_payload
 from metrics_api import MetricsLogReader, parse_timestamp_to_epoch
 from metrics_liveness import settings_from_env
 
@@ -638,7 +639,10 @@ def get_metrics(
         return response
 
     snapshot, _ = _cached_snapshot()
-    items: List[Dict[str, Any]] = []
+
+    cells_out: List[Dict[str, Any]] = []
+    ues_out: List[Dict[str, Any]] = []
+    latest_timestamp: Optional[str] = None
 
     for sid, source_entry in snapshot.items():
         if source_id is not None and sid != source_id:
@@ -647,25 +651,69 @@ def get_metrics(
         entities = source_entry.get("entities") or []
         if cell_id is not None:
             entities = [entity for entity in entities if _entity_matches_cell(entity, cell_id)]
-            if not entities:
+        if not entities:
+            continue
+
+        source_payload = source_entry.get("payload")
+        if isinstance(source_payload, dict):
+            observation = network_observation_from_payload(
+                source_payload,
+                timestamp=source_entry.get("timestamp"),
+            )
+        else:
+            # Older SQLite rows may not have raw payloads available. Rebuild the
+            # OAI-shaped subset from persisted per-UE entities as a fallback.
+            ue_dicts = [entity.get("ue") for entity in entities if isinstance(entity.get("ue"), dict)]
+            if not ue_dicts:
                 continue
 
-        items.append(
-            {
-                "source_id": sid,
-                "timestamp": source_entry.get("timestamp"),
-                "collector_timestamp": source_entry.get("collector_timestamp"),
-                "sequence": source_entry.get("sequence"),
-                "entities": entities,
-            }
-        )
+            observation = network_observation_from_payload(
+                {
+                    "timestamp": source_entry.get("timestamp"),
+                    "oai_mac_stats": {"ues": ue_dicts},
+                },
+                timestamp=source_entry.get("timestamp"),
+            )
+        if observation is None:
+            continue
+
+        # metric_availability is a debugging aid in the agent stream; strip it from the
+        # API response so /metrics matches the network-observation.v1 contract exactly.
+        observation.pop("metric_availability", None)
+
+        # The OAI observation builder always labels its single cell as "cell-0".
+        # When we merge across sources (multi-gNB), rewrite each cell_id to be
+        # globally unique so an agent can correlate UE→cell→source. Format:
+        # "<source_id>-<original_cell_id>".
+        cell_id_remap: Dict[str, str] = {}
+        for cell in observation.get("cells") or []:
+            original = cell.get("cell_id")
+            if original is None:
+                continue
+            new_id = f"{sid}-{original}"
+            cell_id_remap[original] = new_id
+            cell["cell_id"] = new_id
+        for ue in observation.get("ues") or []:
+            original = ue.get("cell_id")
+            if original in cell_id_remap:
+                ue["cell_id"] = cell_id_remap[original]
+
+        cells_out.extend(observation.get("cells") or [])
+        ues_out.extend(observation.get("ues") or [])
+        observation_timestamp = observation.get("timestamp")
+        if latest_timestamp is None:
+            latest_timestamp = observation_timestamp
+        else:
+            observation_epoch = parse_timestamp_to_epoch(observation_timestamp) or float("-inf")
+            latest_epoch = parse_timestamp_to_epoch(latest_timestamp) or float("-inf")
+            if observation_epoch > latest_epoch:
+                latest_timestamp = observation_timestamp
 
     return {
-        "schema_version": API_SCHEMA_VERSION,
-        "mode": "latest-snapshot",
-        "transport": _transport_metadata(),
-        "count": len(items),
-        "items": items,
+        "schema_version": "network-observation.v1",
+        "timestamp": latest_timestamp,
+        "cells": cells_out,
+        "ues": ues_out,
     }
 
 

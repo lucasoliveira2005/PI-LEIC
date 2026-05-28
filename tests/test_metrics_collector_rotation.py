@@ -5,13 +5,16 @@ import tempfile
 import types
 import unittest
 from pathlib import Path
+from unittest.mock import patch
 
 # Stub out the websocket module before the collector package imports it.
 sys.modules.setdefault("websocket", types.SimpleNamespace(WebSocketApp=object))
 
+import collector.enrichment as enrichment  # noqa: E402
 from collector.enrichment import enrich_event  # noqa: E402
 from collector.storage import EventWriter, SQLiteEventSink  # noqa: E402
 from collector.transport import (  # noqa: E402
+    OaiMacStatsFileAdapter,
     WebSocketSourceAdapter,
     build_transport_adapter,
     websocket_keepalive_kwargs,
@@ -248,6 +251,45 @@ class EventWriterRotationTests(unittest.TestCase):
 
         adapter = build_transport_adapter(source)
         self.assertIsInstance(adapter, WebSocketSourceAdapter)
+
+    def test_transport_adapter_factory_returns_oai_mac_stats_adapter(self):
+        source = {
+            "source_id": "oai-gnb1",
+            "gnb_id": "oai-gnb1",
+            "transport": "oai_mac_stats",
+            "log_path": "/tmp/nrMAC-stats.log",
+        }
+
+        adapter = build_transport_adapter(source)
+        self.assertIsInstance(adapter, OaiMacStatsFileAdapter)
+
+    def test_load_sources_resolves_oai_log_path_relative_to_repo_root(self):
+        with tempfile.TemporaryDirectory() as tmp:
+            repo_root = Path(tmp)
+            config_dir = repo_root / "config"
+            config_dir.mkdir()
+            sources_config = config_dir / "metrics_sources_oai.json"
+            sources_config.write_text(
+                json.dumps(
+                    [
+                        {
+                            "source_id": "oai-gnb1",
+                            "gnb_id": "oai-gnb1",
+                            "transport": "oai_mac_stats",
+                            "log_path": "metrics/oran/gnb.sa.band78.rfsim/nrMAC_stats.log",
+                        }
+                    ]
+                ),
+                encoding="utf-8",
+            )
+
+            with patch.object(enrichment, "SOURCES_CONFIG", sources_config):
+                sources = enrichment.load_sources()
+
+            self.assertEqual(
+                sources[0]["log_path"],
+                str(repo_root / "metrics/oran/gnb.sa.band78.rfsim/nrMAC_stats.log"),
+            )
 
     def test_sqlite_sink_migrates_old_schema_on_open(self):
         """SQLiteEventSink must open a DB created without event_type/source_endpoint and write to it."""

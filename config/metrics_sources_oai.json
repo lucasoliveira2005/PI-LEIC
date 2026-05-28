@@ -1,0 +1,16 @@
+[
+  {
+    "source_id": "oai-gnb1",
+    "gnb_id": "oai-gnb1",
+    "transport": "oai_mac_stats",
+    "log_path": "metrics/oran/gnb.sa.band78.rfsim/nrMAC_stats.log",
+    "poll_seconds": 1.0
+  },
+  {
+    "source_id": "oai-gnb2",
+    "gnb_id": "oai-gnb2",
+    "transport": "oai_mac_stats",
+    "log_path": "metrics/oran/gnb2.sa.band78.rfsim/nrMAC_stats.log",
+    "poll_seconds": 1.0
+  }
+]

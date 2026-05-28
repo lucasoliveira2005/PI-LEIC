@@ -15,11 +15,20 @@ from env_utils import (
 _COLLECTOR_DIR = Path(__file__).resolve().parent  # src/collector/
 _SRC_DIR = _COLLECTOR_DIR.parent                  # src/
 
+RAN_BACKEND: str = (os.environ.get("RAN_BACKEND", "oai") or "oai").strip().lower()
+_DEFAULT_SOURCES_CONFIG = (
+    _SRC_DIR / "../config/metrics_sources_oai.json"
+    if RAN_BACKEND in {"oai", "oran", "openairinterface"}
+    else _SRC_DIR / "../config/metrics_sources.json"
+)
 SOURCES_CONFIG: Path = Path(
-    os.environ.get("METRICS_SOURCES_CONFIG", str(_SRC_DIR / "../config/metrics_sources.json"))
+    os.environ.get("METRICS_SOURCES_CONFIG", str(_DEFAULT_SOURCES_CONFIG))
 )
 OUT: Path = Path(
     os.environ.get("METRICS_OUT", str(_SRC_DIR / "../metrics/gnb_metrics.jsonl"))
+)
+AGENT_OUT: Path = Path(
+    os.environ.get("METRICS_AGENT_OUT", str(_SRC_DIR / "../metrics/agent_network_observations.jsonl"))
 )
 
 ROTATE_MAX_BYTES: int = parse_non_negative_int_env("METRICS_ROTATE_MAX_BYTES", 50 * 1024 * 1024)

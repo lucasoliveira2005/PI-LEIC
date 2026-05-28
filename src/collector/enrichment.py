@@ -3,8 +3,10 @@
 from __future__ import annotations
 
 import json
+import os
 import urllib.parse
 from datetime import datetime, timezone
+from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from shared.identity import extract_cell_ue_entities  # re-exported for collector consumers
@@ -13,11 +15,25 @@ from .config import METRICS_SCHEMA_VERSION, SOURCES_CONFIG
 
 
 def required_source_keys() -> List[str]:
-    return ["source_id", "gnb_id", "ws_url"]
+    return ["source_id", "gnb_id"]
 
 
 def source_endpoint(source: Dict) -> str:
-    return source.get("ws_url", "-")
+    return source.get("ws_url") or source.get("log_path") or "-"
+
+
+def source_transport(source: Dict) -> str:
+    return str(source.get("transport") or "websocket_json")
+
+
+def resolve_oai_log_path(log_path: str) -> str:
+    expanded = Path(os.path.expandvars(os.path.expanduser(str(log_path))))
+    if expanded.is_absolute():
+        return str(expanded)
+
+    config_dir = SOURCES_CONFIG.resolve().parent
+    base_dir = config_dir.parent if config_dir.name == "config" else config_dir
+    return str((base_dir / expanded).resolve())
 
 
 def load_sources() -> List[Dict]:
@@ -27,21 +43,34 @@ def load_sources() -> List[Dict]:
     if not isinstance(sources, list) or not sources:
         raise ValueError(f"Expected a non-empty list in {SOURCES_CONFIG}")
 
-    required_keys = set(required_source_keys())
     for source in sources:
+        required_keys = set(required_source_keys())
+        transport = source_transport(source)
+        if transport == "websocket_json":
+            required_keys.add("ws_url")
+        elif transport == "oai_mac_stats":
+            required_keys.add("log_path")
+        else:
+            raise ValueError(
+                f"Source '{source.get('source_id', '?')}' has unsupported transport '{transport}'"
+            )
+
         missing = required_keys.difference(source)
         if missing:
             missing_str = ", ".join(sorted(missing))
             raise ValueError(f"Missing keys in source config {source}: {missing_str}")
 
-        sid = source.get("source_id", "?")
-        ws_url = source.get("ws_url", "")
-        scheme = urllib.parse.urlparse(ws_url).scheme
-        if scheme not in {"ws", "wss"}:
-            raise ValueError(
-                f"Source '{sid}' has invalid ws_url '{ws_url}': "
-                f"scheme must be 'ws' or 'wss', got '{scheme or '(empty)'}'"
-            )
+        if transport == "websocket_json":
+            sid = source.get("source_id", "?")
+            ws_url = source.get("ws_url", "")
+            scheme = urllib.parse.urlparse(ws_url).scheme
+            if scheme not in {"ws", "wss"}:
+                raise ValueError(
+                    f"Source '{sid}' has invalid ws_url '{ws_url}': "
+                    f"scheme must be 'ws' or 'wss', got '{scheme or '(empty)'}'"
+                )
+        elif transport == "oai_mac_stats":
+            source["log_path"] = resolve_oai_log_path(str(source["log_path"]))
 
     return sources
 
@@ -49,6 +78,8 @@ def load_sources() -> List[Dict]:
 def metric_family(payload: Dict) -> str:
     if "cells" in payload:
         return "cells"
+    if "oai_mac_stats" in payload:
+        return "oai_mac_stats"
     if "rlc_metrics" in payload:
         return "rlc_metrics"
     if "du_low" in payload:
@@ -136,7 +167,7 @@ def extract_context(payload: Dict) -> Dict:
 
 def enrich_event(source: Dict, payload: Dict) -> Dict:
     family = metric_family(payload)
-    endpoint_value = source.get("ws_url")
+    endpoint_value = source_endpoint(source)
 
     event = {
         "collector_timestamp": datetime.now(timezone.utc).isoformat(),
@@ -177,5 +208,20 @@ def summarize_event(
                 f" snr={snr:.2f}"
             )
         return f"[{source_id}] cells entities=0"
+
+    if family == "oai_mac_stats":
+        stats = payload.get("oai_mac_stats") if isinstance(payload, dict) else {}
+        ues = stats.get("ues") if isinstance(stats, dict) else []
+        if isinstance(ues, list) and ues:
+            sample = ues[0] if isinstance(ues[0], dict) else {}
+            dl_goodput = sample.get("dl_goodput_mbps") or 0
+            ul_goodput = sample.get("ul_goodput_mbps") or 0
+            return (
+                f"[{source_id}] oai_mac_stats "
+                f"ues={len(ues)} sample=rnti:{sample.get('rnti', '-')}"
+                f" dl_goodput={dl_goodput:.2f}"
+                f" ul_goodput={ul_goodput:.2f}"
+            )
+        return f"[{source_id}] oai_mac_stats ues=0"
 
     return f"[{source_id}] {family} timestamp={event.get('timestamp') or '-'}"
