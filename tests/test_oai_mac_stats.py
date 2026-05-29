@@ -4,7 +4,7 @@ import types
 
 sys.modules.setdefault("websocket", types.SimpleNamespace(WebSocketApp=object))
 
-from collector.oai_mac_stats import parse_oai_mac_stats_text
+from collector.oai_mac_stats import parse_oai_mac_stats_text  # noqa: E402
 
 
 OAI_MAC_STATS_SAMPLE = """

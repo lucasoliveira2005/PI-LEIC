@@ -7,13 +7,13 @@ from pathlib import Path
 
 sys.modules.setdefault("websocket", types.SimpleNamespace(WebSocketApp=object))
 
-from collector.network_observation import (
+from collector.network_observation import (  # noqa: E402
     AgentObservationWriter,
     FORBIDDEN_AGENT_KEYS,
     SCHEMA_VERSION,
     network_observation_from_payload,
 )
-from collector.oai_mac_stats import parse_oai_mac_stats_text
+from collector.oai_mac_stats import parse_oai_mac_stats_text  # noqa: E402
 
 
 def _walk_keys(value):
