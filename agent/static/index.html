@@ -1,0 +1,151 @@
+<!doctype html>
+<html lang="pt-PT">
+  <head>
+    <meta charset="utf-8" />
+    <meta name="viewport" content="width=device-width,initial-scale=1" />
+    <title>PI-LEIC Agent — Chat</title>
+    <style>
+      :root{
+        --bg-1: #0f1724;
+        --bg-2: #071027;
+        --user: #2563eb;
+        --agent: #111827;
+        --muted: #94a3b8;
+      }
+      html,body{height:100%;}
+      body { margin:0; font-family: Inter, ui-sans-serif, system-ui, -apple-system, "Segoe UI", Roboto, "Helvetica Neue", Arial; background: linear-gradient(180deg,var(--bg-1),var(--bg-2)); color:#e6eef8; display:flex; align-items:center; justify-content:center; }
+      .app { width:100%; max-width:920px; height:86vh; background:linear-gradient(180deg, rgba(255,255,255,0.02), rgba(255,255,255,0.01)); border-radius:12px; box-shadow: 0 10px 30px rgba(2,6,23,0.8); overflow:hidden; display:flex; flex-direction:column; }
+      header{ padding:18px 20px; display:flex; align-items:center; gap:12px; border-bottom:1px solid rgba(255,255,255,0.03); }
+      .brand { font-weight:600; font-size:16px; color:#fff }
+      .subtitle { color:var(--muted); font-size:13px }
+      .messages { flex:1; padding:20px; overflow:auto; background: linear-gradient(180deg, rgba(255,255,255,0.01), transparent); }
+      .message { display:flex; gap:12px; margin:10px 0; align-items:flex-end; }
+      .message.agent { justify-content:flex-start; }
+      .message.user { justify-content:flex-end; flex-direction:row-reverse; }
+      .avatar { width:36px; height:36px; border-radius:50%; display:inline-flex; align-items:center; justify-content:center; font-weight:600; color:#fff; flex:0 0 36px }
+      .avatar.agent { background:#0ea5a9 }
+      .avatar.user { background:var(--user) }
+      .bubble { max-width:78%; padding:12px 14px; border-radius:12px; font-size:14px; line-height:1.35; white-space:pre-wrap; }
+      .bubble.agent { background:var(--agent); color:#e6eef8; border:1px solid rgba(255,255,255,0.02); }
+      .bubble.user { background:linear-gradient(90deg,var(--user), #60a5fa); color:#062244; }
+      .meta { font-size:12px; color:var(--muted); margin-top:6px }
+      .composer { padding:12px; border-top:1px solid rgba(255,255,255,0.03); display:flex; gap:8px; align-items:center; }
+      .input { flex:1; display:flex; gap:8px; align-items:center; }
+      .input input { width:100%; padding:12px 14px; border-radius:999px; border:none; background:rgba(255,255,255,0.03); color:#e6eef8; outline:none; font-size:14px }
+      .send { background:linear-gradient(90deg,#2563eb,#60a5fa); color:#fff; border:none; padding:10px 14px; border-radius:999px; cursor:pointer; font-weight:600 }
+      .thinking { display:inline-block; width:40px; text-align:left }
+      .dot{ display:inline-block; width:8px; height:8px; background:#c7d2fe; border-radius:50%; margin-right:6px; opacity:0.9 }
+      .dot:nth-child(1){ animation: blink 1s infinite 0s }
+      .dot:nth-child(2){ animation: blink 1s infinite 0.12s }
+      .dot:nth-child(3){ animation: blink 1s infinite 0.24s }
+      @keyframes blink{ 0%{opacity:0.2; transform:translateY(0)} 50%{opacity:1; transform:translateY(-3px)} 100%{opacity:0.2; transform:translateY(0)} }
+      @media (max-width:640px){ .app{ height:92vh; border-radius:0; max-width:100% } .bubble{max-width:86%} }
+    </style>
+  </head>
+  <body>
+    <div class="app" role="application">
+      <header>
+        <div class="brand">PI-LEIC Agent</div>
+        <div class="subtitle">Chat interface — pergunta e recebe respostas técnicas</div>
+      </header>
+
+      <div id="chat" class="messages" aria-live="polite"></div>
+
+      <div class="composer">
+        <div class="input">
+          <input id="question" placeholder="Escreve a tua pergunta e pressiona Enter" aria-label="Mensagem" />
+        </div>
+        <button id="ask" class="send">Enviar</button>
+      </div>
+    </div>
+
+    <script>
+      const chatEl = document.getElementById('chat');
+      const questionInput = document.getElementById('question');
+
+      function formatTime(){
+        const d = new Date();
+        return d.toLocaleTimeString([], {hour:'2-digit', minute:'2-digit'});
+      }
+
+      function makeThinkingBubble(){
+        const container = document.createElement('div');
+        container.className = 'message agent';
+        container.innerHTML = `
+          <div class="avatar agent">A</div>
+          <div>
+            <div class="bubble agent"><span class="thinking"><span class="dot"></span><span class="dot"></span><span class="dot"></span></span></div>
+            <div class="meta">${formatTime()}</div>
+          </div>
+        `;
+        return container;
+      }
+
+      function appendMessage(who, text){
+        const el = document.createElement('div');
+        el.className = 'message ' + (who === 'user' ? 'user' : 'agent');
+        const avatar = document.createElement('div');
+        avatar.className = 'avatar ' + (who === 'user' ? 'user' : 'agent');
+        avatar.textContent = who === 'user' ? 'Tu' : 'A';
+
+        const bubbleWrap = document.createElement('div');
+        const bubble = document.createElement('div');
+        bubble.className = 'bubble ' + (who === 'user' ? 'user' : 'agent');
+        bubble.textContent = text;
+        const meta = document.createElement('div');
+        meta.className = 'meta';
+        meta.textContent = formatTime();
+
+        bubbleWrap.appendChild(bubble);
+        bubbleWrap.appendChild(meta);
+
+        el.appendChild(avatar);
+        el.appendChild(bubbleWrap);
+        chatEl.appendChild(el);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        return el;
+      }
+
+      async function askQuestion(q){
+        appendMessage('user', q);
+        const thinking = makeThinkingBubble();
+        chatEl.appendChild(thinking);
+        chatEl.scrollTop = chatEl.scrollHeight;
+        try{
+          const res = await fetch('/ask', { method: 'POST', headers: {'Content-Type':'application/json'}, body: JSON.stringify({question: q}) });
+          const json = await res.json();
+          const bubble = thinking.querySelector('.bubble');
+          const meta = thinking.querySelector('.meta');
+          if(json.answer){
+            bubble.textContent = json.answer;
+            meta.textContent = formatTime();
+          } else if(json.error){
+            bubble.textContent = 'Error: ' + json.error;
+            meta.textContent = formatTime();
+          }
+        }catch(e){
+          const bubble = thinking.querySelector('.bubble');
+          bubble.textContent = 'Fetch error: ' + e;
+        }
+        chatEl.scrollTop = chatEl.scrollHeight;
+      }
+
+      document.getElementById('ask').addEventListener('click', ()=>{
+        const q = questionInput.value.trim();
+        if(!q) return;
+        questionInput.value = '';
+        askQuestion(q);
+      });
+
+      questionInput.addEventListener('keypress', (ev)=>{
+        if(ev.key === 'Enter'){
+          ev.preventDefault();
+          document.getElementById('ask').click();
+        }
+      });
+
+      // focus input on load
+      questionInput.focus();
+    </script>
+  </body>
+</html>

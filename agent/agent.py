@@ -783,6 +783,24 @@ def print_help():
     print("/sair   -> termina o programa\n")
 
 
+def build_network_summary() -> str:
+    """Build a short text summary from the latest metrics snapshot."""
+    metrics_obj = _read_latest_metrics_object()
+    if metrics_obj is None:
+        return "Sem métricas disponíveis no momento."
+
+    try:
+        return build_metrics_report(metrics_obj)
+    except Exception as exc:
+        return f"Erro ao gerar resumo: {exc}"
+
+
+def ask_llm_with_summary(summary: str, question: str) -> str:
+    """Wrapper that merges network summary and question and calls the LLM."""
+    prompt = f"Segue abaixo o resumo atual da rede:\n\n{summary}\n\nQuestion:\n{question}"
+    return ask_llm(prompt)
+
+
 def run_live_analysis(interval_seconds: float = 5.0):
     if interval_seconds <= 0:
         interval_seconds = 5.0
@@ -859,4 +877,17 @@ def main():
         print()
 
 if __name__ == "__main__":
+    import sys
+
+    # Start web UI by default. Use --no-ui to keep CLI-only mode.
+    if "--no-ui" not in sys.argv:
+        try:
+            from agent.web_app import start_ui
+
+            start_ui(open_browser=True)
+            # small pause to let server boot before CLI prompts
+            time.sleep(0.2)
+        except Exception as exc:
+            print(f"Falha ao arrancar UI web: {exc}")
+
     main()
