@@ -354,26 +354,25 @@ class MetricsLogReader:
             ue_json,
             raw_json,
         ) in rows:
-            payload: Dict[str, Any] = {}
-            try:
-                raw_event = json.loads(raw_json) if raw_json else {}
-            except json.JSONDecodeError:
-                raw_event = {}
-            if isinstance(raw_event, dict):
-                extracted_payload = extract_payload(raw_event)
-                if isinstance(extracted_payload, dict):
-                    payload = extracted_payload
-
-            source_entry = latest_by_source.setdefault(
-                source_id,
-                {
+            if source_id not in latest_by_source:
+                payload: Dict[str, Any] = {}
+                try:
+                    raw_event = json.loads(raw_json) if raw_json else {}
+                except json.JSONDecodeError:
+                    raw_event = {}
+                if isinstance(raw_event, dict):
+                    extracted_payload = extract_payload(raw_event)
+                    if isinstance(extracted_payload, dict):
+                        payload = extracted_payload
+                latest_by_source[source_id] = {
                     "timestamp": event_timestamp or collector_timestamp,
                     "collector_timestamp": collector_timestamp,
                     "sequence": int(source_sequence or 0),
                     "payload": payload,
                     "entities": [],
-                },
-            )
+                }
+
+            source_entry = latest_by_source[source_id]
 
             try:
                 ue_metrics = json.loads(ue_json) if ue_json else {}

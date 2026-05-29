@@ -70,6 +70,34 @@ def parse_entity_key(source_id, entity):
     return source_id, cell_index, str(ue_identity)
 
 
+def _dl_kbps(ue_metrics: Dict[str, Any]) -> float:
+    # OAI: dl_goodput_mbps is canonical Mbps — prefer it to avoid unit ambiguity
+    # in synthesized dl_brate values from older stored rows.
+    if ue_metrics.get("dl_goodput_mbps") is not None:
+        return ue_metrics["dl_goodput_mbps"] * 1000
+    # srsRAN: dl_brate in bits/s  →  ÷1000 = kbps
+    if ue_metrics.get("dl_brate") is not None:
+        return ue_metrics["dl_brate"] / 1000
+    return 0.0
+
+
+def _ul_kbps(ue_metrics: Dict[str, Any]) -> float:
+    if ue_metrics.get("ul_goodput_mbps") is not None:
+        return ue_metrics["ul_goodput_mbps"] * 1000
+    if ue_metrics.get("ul_brate") is not None:
+        return ue_metrics["ul_brate"] / 1000
+    return 0.0
+
+
+def _snr_db(ue_metrics: Dict[str, Any]) -> float:
+    # srsRAN uses pucch_snr_db / pusch_snr_db; OAI uses ul_snr_db / sinr_db
+    for key in ("pucch_snr_db", "pusch_snr_db", "ul_snr_db", "sinr_db"):
+        val = ue_metrics.get(key)
+        if val is not None:
+            return float(val)
+    return 0.0
+
+
 def append_entity_sample(entity_key, ue_metrics):
     history = history_by_entity.setdefault(
         entity_key,
@@ -83,11 +111,9 @@ def append_entity_sample(entity_key, ue_metrics):
 
     next_time = history["times"][-1] + 1 if history["times"] else 0
     history["times"].append(next_time)
-    history["dl_rates"].append(ue_metrics.get("dl_brate", 0) / 1000)
-    history["ul_rates"].append(ue_metrics.get("ul_brate", 0) / 1000)
-    history["signal_values"].append(
-        ue_metrics.get("pucch_snr_db", ue_metrics.get("pusch_snr_db", 0))
-    )
+    history["dl_rates"].append(_dl_kbps(ue_metrics))
+    history["ul_rates"].append(_ul_kbps(ue_metrics))
+    history["signal_values"].append(_snr_db(ue_metrics))
 
     if len(history["times"]) > 50:
         history["times"].pop(0)

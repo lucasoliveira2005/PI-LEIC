@@ -724,6 +724,11 @@ start_supervised_stack() {
       fi
       read -r -a ue_args <<< "$OAI_UE_EXTRA_ARGS"
 
+      # OAI nr-uesoftmodem writes nrL1_UE_stats-0.log (and similar) to its CWD
+      # with hard-coded relative paths. Give each UE its own directory under
+      # metrics/oran/ so the logs don't land in the launcher's CWD.
+      local ue_workdir="$WORKDIR/../metrics/oran/ue-$ue_label"
+
       # When the shim declares veth IPs, run the UE inside its netns and create a
       # veth pair so the UE can reach the gNB's RFsim server. This isolates each
       # UE's `oaitun_ue1` TUN — OAI hard-codes the TUN name per process, so two
@@ -742,7 +747,9 @@ start_supervised_stack() {
           printf -v ue_exec_cmd '%s %q' "$ue_exec_cmd" "$ue_arg"
         done
         printf -v ue_script \
-          'set -e; ip netns del %q 2>/dev/null || true; ip link del %q 2>/dev/null || true; ip netns add %q; ip link add %q type veth peer name %q; ip link set %q netns %q; ip addr add %s/30 dev %q; ip link set %q up; ip netns exec %q ip addr add %s/30 dev %q; ip netns exec %q ip link set %q up; ip netns exec %q ip link set lo up; %s' \
+          'set -e; mkdir -p %q; cd %q; ip netns del %q 2>/dev/null || true; ip link del %q 2>/dev/null || true; ip netns add %q; ip link add %q type veth peer name %q; ip link set %q netns %q; ip addr add %s/30 dev %q; ip link set %q up; ip netns exec %q ip addr add %s/30 dev %q; ip netns exec %q ip link set %q up; ip netns exec %q ip link set lo up; %s' \
+          "$ue_workdir" \
+          "$ue_workdir" \
           "$ue_netns" \
           "$veth_host_ifname" \
           "$ue_netns" \
@@ -756,7 +763,9 @@ start_supervised_stack() {
           "$ue_exec_cmd"
       else
         printf -v ue_script \
-          'ip netns del %q 2>/dev/null || true; ip netns add %q; exec %q -O %q' \
+          'mkdir -p %q && cd %q && ip netns del %q 2>/dev/null || true; ip netns add %q; exec %q -O %q' \
+          "$ue_workdir" \
+          "$ue_workdir" \
           "$ue_netns" \
           "$ue_netns" \
           "$UE_BIN_RESOLVED" \
@@ -903,14 +912,50 @@ EOF
     ue_netns="$(read_netns "$ue_config")"
 
     if [[ "$RAN_BACKEND" == "oai" ]]; then
-      ue_command="$(
-        cat <<EOF
-cd '$WORKDIR'
+      local ue_oai_config_t
+      ue_oai_config_t="$(read_ue_config "$ue_config")"
+      if [[ -z "$ue_oai_config_t" ]]; then
+        echo "Missing 'ue_config' in OAI UE launch shim: $ue_config" >&2
+        return 1
+      fi
+      if [[ "$ue_oai_config_t" != /* ]]; then
+        ue_oai_config_t="$(dirname -- "$ue_config")/$ue_oai_config_t"
+      fi
+      # Per-UE workdir so OAI's nrL1_UE_stats-0.log doesn't land in the
+      # launcher's CWD.
+      local ue_workdir_t="$WORKDIR/../metrics/oran/ue-$(config_label "$ue_config")"
+      local ue_veth_host_ip_t ue_veth_ns_ip_t
+      ue_veth_host_ip_t="$(read_veth_host_ip "$ue_config")"
+      ue_veth_ns_ip_t="$(read_veth_ns_ip "$ue_config")"
+      if [[ -n "$ue_veth_host_ip_t" && -n "$ue_veth_ns_ip_t" ]]; then
+        ue_command="$(
+          cat <<EOF
+mkdir -p '$ue_workdir_t'
+cd '$ue_workdir_t'
+sudo -n ip netns del '$ue_netns' 2>/dev/null || true
+sudo -n ip link del 'vh-$ue_netns' 2>/dev/null || true
+sudo -n ip netns add '$ue_netns'
+sudo -n ip link add 'vh-$ue_netns' type veth peer name 'vp-$ue_netns'
+sudo -n ip link set 'vp-$ue_netns' netns '$ue_netns'
+sudo -n ip addr add '$ue_veth_host_ip_t/30' dev 'vh-$ue_netns'
+sudo -n ip link set 'vh-$ue_netns' up
+sudo -n ip netns exec '$ue_netns' ip addr add '$ue_veth_ns_ip_t/30' dev 'vp-$ue_netns'
+sudo -n ip netns exec '$ue_netns' ip link set 'vp-$ue_netns' up
+sudo -n ip netns exec '$ue_netns' ip link set lo up
+sudo -n ip netns exec '$ue_netns' '$UE_BIN_RESOLVED' -O '$ue_oai_config_t' $OAI_UE_EXTRA_ARGS
+EOF
+        )"
+      else
+        ue_command="$(
+          cat <<EOF
+mkdir -p '$ue_workdir_t'
+cd '$ue_workdir_t'
 sudo -n ip netns del '$ue_netns' 2>/dev/null || true
 sudo -n ip netns add '$ue_netns'
-sudo -n '$UE_BIN_RESOLVED' $OAI_UE_EXTRA_ARGS
+sudo -n ip netns exec '$ue_netns' '$UE_BIN_RESOLVED' -O '$ue_oai_config_t' $OAI_UE_EXTRA_ARGS
 EOF
-      )"
+        )"
+      fi
     else
       ue_command="$(
         cat <<EOF

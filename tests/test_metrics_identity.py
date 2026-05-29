@@ -57,8 +57,8 @@ class MetricsIdentityTests(unittest.TestCase):
         self.assertEqual(len(entities), 1)
         self.assertEqual(entities[0]["ue_identity"], "rnti:2460")
         self.assertEqual(entities[0]["pci"], 10)
-        self.assertAlmostEqual(entities[0]["ue"]["dl_brate"], 120500.0)
-        self.assertAlmostEqual(entities[0]["ue"]["ul_brate"], 12300.0)
+        self.assertAlmostEqual(entities[0]["ue"]["dl_brate"], 120_500_000.0)
+        self.assertAlmostEqual(entities[0]["ue"]["ul_brate"], 12_300_000.0)
         self.assertAlmostEqual(entities[0]["ue"]["pusch_snr_db"], 31.0)
 
 

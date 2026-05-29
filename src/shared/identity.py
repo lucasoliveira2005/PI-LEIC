@@ -71,9 +71,9 @@ def extract_oai_mac_ue_entities(oai_stats: Dict) -> List[Dict]:
 
         ue_copy = dict(ue_metrics)
         if ue_copy.get("dl_brate") is None and ue_copy.get("dl_goodput_mbps") is not None:
-            ue_copy["dl_brate"] = float(ue_copy["dl_goodput_mbps"]) * 1000.0
+            ue_copy["dl_brate"] = float(ue_copy["dl_goodput_mbps"]) * 1_000_000.0
         if ue_copy.get("ul_brate") is None and ue_copy.get("ul_goodput_mbps") is not None:
-            ue_copy["ul_brate"] = float(ue_copy["ul_goodput_mbps"]) * 1000.0
+            ue_copy["ul_brate"] = float(ue_copy["ul_goodput_mbps"]) * 1_000_000.0
         if ue_copy.get("pusch_snr_db") is None and ue_copy.get("ul_snr_db") is not None:
             ue_copy["pusch_snr_db"] = ue_copy["ul_snr_db"]
         if ue_copy.get("pucch_snr_db") is None and ue_copy.get("dl_snr_db") is not None:

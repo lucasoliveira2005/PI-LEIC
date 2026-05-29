@@ -661,16 +661,26 @@ def get_metrics(
                 timestamp=source_entry.get("timestamp"),
             )
         else:
-            # Older SQLite rows may not have raw payloads available. Rebuild the
-            # OAI-shaped subset from persisted per-UE entities as a fallback.
-            ue_dicts = [entity.get("ue") for entity in entities if isinstance(entity.get("ue"), dict)]
-            if not ue_dicts:
+            # Older SQLite rows may not have raw payloads. Rebuild a minimal
+            # srsRAN-shaped cells payload from persisted per-UE entities so the
+            # srsRAN parser runs and dl_brate/ul_brate fields survive.
+            cells_by_index: Dict[int, List[Dict[str, Any]]] = {}
+            for entity in entities:
+                ue = entity.get("ue")
+                if not isinstance(ue, dict):
+                    continue
+                idx = int(entity.get("cell_index") or 0)
+                cells_by_index.setdefault(idx, []).append(ue)
+            if not cells_by_index:
                 continue
 
             observation = network_observation_from_payload(
                 {
                     "timestamp": source_entry.get("timestamp"),
-                    "oai_mac_stats": {"ues": ue_dicts},
+                    "cells": [
+                        {"cell_metrics": {}, "ue_list": ues}
+                        for _, ues in sorted(cells_by_index.items())
+                    ],
                 },
                 timestamp=source_entry.get("timestamp"),
             )
@@ -711,6 +721,8 @@ def get_metrics(
 
     return {
         "schema_version": "network-observation.v1",
+        "mode": "latest-snapshot",
+        "count": len(ues_out),
         "timestamp": latest_timestamp,
         "cells": cells_out,
         "ues": ues_out,

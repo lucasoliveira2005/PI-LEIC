@@ -1,6 +1,6 @@
 """Parser for OpenAirInterface gNB MAC scheduler statistics.
 
-OAI writes human-readable UE scheduler snapshots to ``nrMAC-stats.log``.  This
+OAI writes human-readable UE scheduler snapshots to ``nrMAC_stats.log``.  This
 module converts the documented lines into a structured payload that the
 collector can ingest like any other metric source.
 """

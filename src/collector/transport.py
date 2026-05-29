@@ -83,7 +83,7 @@ class WebSocketSourceAdapter(SourceTransportAdapter):
 
 
 class OaiMacStatsFileAdapter(SourceTransportAdapter):
-    """Poll and parse an OAI ``nrMAC-stats.log`` file."""
+    """Poll and parse an OAI ``nrMAC_stats.log`` file."""
 
     def __init__(self, source: Dict[str, Any]):
         self.source = source

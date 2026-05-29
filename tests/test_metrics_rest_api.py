@@ -207,8 +207,8 @@ class MetricsRestApiTests(unittest.TestCase):
         )
         self.assertAlmostEqual(payload["ues"][0]["throughput"]["dl_goodput_mbps"], 0.2)
         self.assertAlmostEqual(payload["ues"][1]["throughput"]["dl_goodput_mbps"], 0.3)
-        self.assertNotIn("mode", payload)
-        self.assertNotIn("count", payload)
+        self.assertEqual(payload["mode"], "latest-snapshot")
+        self.assertEqual(payload["count"], 2)
         self.assertNotIn("transport", payload)
 
     def test_get_metrics_with_time_window_returns_event_window(self):
