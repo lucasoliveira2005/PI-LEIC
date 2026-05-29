@@ -25,6 +25,7 @@ from .config import (
     METRICS_SQLITE_TIMEOUT_SECONDS,
     METRICS_WS_PING_INTERVAL_SECONDS,
     METRICS_WS_PING_TIMEOUT_SECONDS,
+    AGENT_OUT,
     OUT,
     RECONNECT_SECONDS,
     ROTATE_MAX_BYTES,
@@ -39,8 +40,10 @@ from .enrichment import (
     load_sources,
     metric_family,
     source_endpoint,
+    source_transport,
     summarize_event,
 )
+from .network_observation import AgentObservationWriter, network_observation_from_event
 from .storage import EventWriter
 from .transport import build_transport_adapter
 
@@ -55,10 +58,12 @@ class MetricsSourceWorker:
         self,
         source: Dict[str, Any],
         writer: EventWriter,
+        agent_writer: Optional[AgentObservationWriter] = None,
         stop_event: Optional[threading.Event] = None,
     ):
         self.source = source
         self.writer = writer
+        self.agent_writer = agent_writer
         self.transport_adapter = build_transport_adapter(source)
         # Shared stop event; if not provided, each worker owns its own (useful in tests).
         self.stop_event: threading.Event = (
@@ -76,21 +81,23 @@ class MetricsSourceWorker:
         self.transport_adapter.stop()
 
     def on_open(self, ws: Any) -> None:
+        transport = source_transport(self.source)
         emit_structured_log(
             "source.connected",
-            f"[{self.source['source_id']}] Connected to {source_endpoint(self.source)} via websocket",
+            f"[{self.source['source_id']}] Connected to {source_endpoint(self.source)} via {transport}",
             service=_LOG_SERVICE,
             source_id=self.source["source_id"],
             source_endpoint=source_endpoint(self.source),
-            transport="websocket",
+            transport=transport,
         )
-        ws.send(json.dumps({"cmd": "metrics_subscribe"}))
-        emit_structured_log(
-            "source.subscribed",
-            f"[{self.source['source_id']}] Subscribed to metrics",
-            service=_LOG_SERVICE,
-            source_id=self.source["source_id"],
-        )
+        if transport == "websocket_json" and ws is not None:
+            ws.send(json.dumps({"cmd": "metrics_subscribe"}))
+            emit_structured_log(
+                "source.subscribed",
+                f"[{self.source['source_id']}] Subscribed to metrics",
+                service=_LOG_SERVICE,
+                source_id=self.source["source_id"],
+            )
 
     def on_message(self, _ws: Any, message: str) -> None:
         try:
@@ -141,6 +148,10 @@ class MetricsSourceWorker:
         )
         event = enrich_event(self.source, payload)
         self.writer.write(event, entities=entities)
+        if self.agent_writer is not None:
+            observation = network_observation_from_event(event)
+            if observation is not None:
+                self.agent_writer.write(observation)
         emit_structured_log(
             "metric.received",
             summarize_event(event, entities=entities),
@@ -153,12 +164,13 @@ class MetricsSourceWorker:
 
     def on_error(self, _ws: Any, error: Any) -> None:
         emit_structured_log(
-            "source.websocket_error",
-            f"[{self.source['source_id']}] WebSocket error: {error}",
+            "source.transport_error",
+            f"[{self.source['source_id']}] Source transport error: {error}",
             level="error",
             service=_LOG_SERVICE,
             source_id=self.source["source_id"],
             error=str(error),
+            transport=source_transport(self.source),
         )
 
     def on_close(self, _ws: Any, close_status_code: Any, close_msg: Any) -> None:
@@ -291,6 +303,7 @@ def main() -> None:
         sqlite_retention_interval_events=METRICS_SQLITE_RETENTION_INTERVAL_EVENTS,
         sqlite_retention_vacuum=METRICS_SQLITE_RETENTION_VACUUM,
     )
+    agent_writer = AgentObservationWriter(AGENT_OUT)
 
     emit_structured_log(
         "collector.ready",
@@ -303,6 +316,12 @@ def main() -> None:
         f"Writing enriched metrics to: {OUT.resolve()}",
         service=_LOG_SERVICE,
         output_path=OUT.resolve(),
+    )
+    emit_structured_log(
+        "collector.agent_output_configured",
+        f"Writing agent network observations to: {AGENT_OUT.resolve()}",
+        service=_LOG_SERVICE,
+        output_path=AGENT_OUT.resolve(),
     )
     if ROTATE_MAX_BYTES > 0 and ROTATE_MAX_FILES > 0:
         emit_structured_log(
@@ -350,9 +369,9 @@ def main() -> None:
 
     emit_structured_log(
         "collector.transport",
-        "Transport: websocket (srsRAN JSON metrics server)",
+        "Source transports configured.",
         service=_LOG_SERVICE,
-        transport="websocket",
+        transports=sorted({source_transport(source) for source in sources}),
     )
 
     if METRICS_WS_PING_INTERVAL_SECONDS > 0:
@@ -388,7 +407,7 @@ def main() -> None:
 
     threads = []
     for source in sources:
-        worker = MetricsSourceWorker(source, writer, stop_event=stop_event)
+        worker = MetricsSourceWorker(source, writer, agent_writer, stop_event=stop_event)
         thread = threading.Thread(target=worker.run, name=source["source_id"], daemon=True)
         thread.start()
         threads.append(thread)

@@ -53,8 +53,8 @@ be wired into a control pipeline.
         ┌───────────▼─┐           ┌─▼─────────────────────────┐
         │ dashboard.py│           │   metrics_rest_api.py     │
         │ Matplotlib  │           │   FastAPI on :8000        │
-        └─────────────┘           │   /metrics  /metrics_prom │
-                                  │   /alerts   /health       │
+        └─────────────┘           │   /metrics  /alerts       │
+                                  │   /health   /capabilities │
                                   │   /query    /actions      │
                                   └───────────────────────────┘
 ```
@@ -87,14 +87,11 @@ the one above:
   row per enriched event) and `metrics_cell_entities` (per-UE denormalized for
   fast range queries). Retention is bounded (`METRICS_SQLITE_RETENTION_MAX_ROWS`,
   default 200k). If SQLite is unavailable, every reader falls back to JSONL.
-* **Prometheus exposition (`/metrics_prom`)** is a stateless projection built
-  on top of the same snapshot cache used by `/metrics`. Grafana reads it.
 
 ### Hard invariants
 
 1. `MetricsLogReader` is SQLite-first with JSONL fallback. Both dashboards and
-   the REST API depend on it. In the future, this read boundary is where
-   InfluxDB or the O-RAN SC-RIC shared data layer can be wired in.
+   the REST API depend on it.
 2. The freshness contract (`shared/liveness.py`) is shared by the launcher,
    the validator, and the REST API. The shell side (`launch_lib/metrics_contract.sh`)
    wraps the same Python helpers.
@@ -102,10 +99,7 @@ the one above:
    retry + cooldown logic to SQLite only.
 4. UE identity precedence is `ue > rnti > positional`. Dashboard deduplication,
    REST entity matching, and freshness signatures all depend on this order.
-5. `/metrics_prom` is read-only. It must not mutate `api_alert_state`, because
-   Prometheus scrapes every few seconds and any mutation would corrupt
-   `first_seen_at` / `cleared_at` transitions.
-6. Collector/API/dashboard supervision is user-scoped. The launcher uses root
+5. Collector/API/dashboard supervision is user-scoped. The launcher uses root
    only for Open5GS, gNB, UE namespace, and privileged network operations; it
    never uses `sudo` for user-scoped service management.
 
@@ -144,7 +138,6 @@ In a second terminal:
 curl -s http://127.0.0.1:8000/health  | jq
 curl -s http://127.0.0.1:8000/metrics | jq
 curl -s 'http://127.0.0.1:8000/alerts?status=open' | jq
-curl -s http://127.0.0.1:8000/metrics_prom
 ```
 
 Stop cleanly: `bash src/launch_stack.sh --stop`.
@@ -156,7 +149,6 @@ Full validation (needs real Open5GS and srsRAN): `bash src/validate_stage.sh`.
 
 ```
 config/                      gNB/UE configs, subscribers, metrics source registry
-config/grafana/              importable Grafana dashboard + Prometheus scrape stub
 D1/                          Design document and UML diagrams
 metrics/                     Runtime JSONL output (gitignored)
 var/                         Persistent runtime state: audit DB, freshness baseline (gitignored)
@@ -176,7 +168,7 @@ src/
     env_utils.py             env var parsing helpers
   api_models.py              Pydantic request/response models
   metrics_api.py             SQLite-first reader with JSONL fallback
-  metrics_rest_api.py        FastAPI app (REST + Prometheus scrape)
+  metrics_rest_api.py        FastAPI app (REST)
   dashboard.py               Matplotlib live dashboard
   provision_subscribers.py   Open5GS MongoDB upsert
 tests/                       Python unit tests and rootless shell tests
@@ -218,15 +210,13 @@ See `STAGE_OVERVIEW.md` §6 and §12 for the manual single-component flow.
 
 ## REST API
 
-Base URL `http://127.0.0.1:8000`. JSON responses everywhere except
-`/metrics_prom`, which returns Prometheus text exposition.
+Base URL `http://127.0.0.1:8000`. JSON responses everywhere.
 
 | Endpoint | Purpose |
 | --- | --- |
 | `GET /health`        | Liveness, per-source freshness; always reads fresh, bypasses the snapshot cache |
-| `GET /capabilities`  | Feature flags, ingestion vs target transport, ruleset, freshness policy |
+| `GET /capabilities`  | Feature flags, ingestion transport, ruleset, freshness policy |
 | `GET /metrics`       | Latest snapshot, or a time window with `from` / `to` / `cell_id` / `source_id` filters |
-| `GET /metrics_prom`  | Prometheus gauges per source and per UE; also `alerts_open` counts and `api_uptime_seconds`. Read-only |
 | `GET /alerts?status=open\|all` | Rule-based alerts with provenance (`rule.id`, `rule.parameters`, `rule.evidence`); lifecycle persisted in audit DB |
 | `POST /query`        | Operator question, currently a deterministic stub (`answered_stub`, `llm_not_integrated`) |
 | `POST /actions`      | Strict `ActionIntent` audit-only submission |
@@ -265,24 +255,6 @@ submissions are rejected by Pydantic at parse time.
 * `approve=true`  → `status=approved_not_executed`, audit row written. Runtime
   parameter mutation is deliberately disabled in this stage.
 
-### Prometheus scrape
-
-```yaml
-scrape_configs:
-  - job_name: pi-leic-api
-    scrape_interval: 5s
-    scrape_timeout: 3s
-    metrics_path: /metrics_prom
-    static_configs:
-      - targets: ["127.0.0.1:8000"]
-```
-
-Connect Grafana to the same Prometheus instance, then import
-`config/grafana/pi-leic-overview.json`. The dashboard expects a Prometheus
-datasource and renders per-source freshness, per-UE throughput and SNR, open
-alerts by type, sample age, and sequence progression. A ready-to-copy scrape
-config also lives at `config/grafana/prometheus-scrape.yml`.
-
 ### Dashboard (Matplotlib)
 
 ```bash
@@ -290,8 +262,7 @@ python src/dashboard.py
 ```
 
 Local window showing a 50-sample rolling history per `(source_id, ue_identity)`
-pair. Headless operation is not supported; use the Prometheus exporter and
-Grafana for browser-reachable viewing.
+pair. Headless operation is not supported; run it in a graphical session.
 
 ---
 
@@ -379,10 +350,8 @@ complete list.
 | `METRICS_WS_PING_TIMEOUT_SECONDS` | `5` | WebSocket ping timeout, clamped to interval |
 
 Collector ingestion is not env-selectable in this stage:
-`WebSocketSourceAdapter` is the only active backend. The planned target is an
-E2SM-KPM adapter beside it; the old ZMQ-as-metrics-transport direction was
-retired. The ZMQ in the gNB/UE config files is only the RF-plane fake-radio
-link.
+`WebSocketSourceAdapter` is the only active backend. The ZMQ in the gNB/UE
+config files is only the RF-plane fake-radio link, not a metrics transport.
 
 ### REST API and alerts
 
@@ -444,9 +413,8 @@ CI (`.github/workflows/ci.yml`) has two jobs on every push and pull request:
 
 1. **test**: shell syntax, rootless shell behavior tests, Python syntax,
    `ruff check` (E, F), and the full unit test suite.
-2. **api_smoke**: boots the REST API against a synthetic JSONL fixture, hits
-   `/metrics`, `/alerts`, `/metrics_prom`, and verifies that repeated
-   Prometheus scrapes do not mutate the alert lifecycle.
+2. **api_smoke**: boots the REST API against a synthetic JSONL fixture and hits
+   `/metrics` and `/alerts`.
 
 The full end-to-end validator (`validate_stage.sh`) needs real Open5GS and
 srsRAN on the host and is therefore not run in CI.

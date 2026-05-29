@@ -97,7 +97,7 @@ class SQLiteEventSink:
                 """
             )
             # Composite index that lets the latest-by-source query (MAX(id) +
-            # COUNT(*) GROUP BY source_id WHERE metric_family = 'cells') stay
+            # COUNT(*) GROUP BY source_id WHERE metric_family IN (...)) stay
             # index-only without scanning the cells partition.
             self.conn.execute(
                 """
@@ -170,7 +170,7 @@ class SQLiteEventSink:
             )
             event_id = cursor.lastrowid
 
-            if metric_family != "cells":
+            if metric_family not in {"cells", "oai_mac_stats"}:
                 return
 
             payload = event.get("raw_payload")

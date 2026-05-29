@@ -27,8 +27,6 @@ from pathlib import Path
 from typing import Any, Dict, List, Optional
 
 from fastapi import FastAPI, HTTPException, Query
-from fastapi.responses import PlainTextResponse
-
 from api_models import ActionRequest, QueryRequest
 from env_utils import (
     parse_bool_env,
@@ -36,6 +34,7 @@ from env_utils import (
     parse_non_negative_float_env,
     parse_non_negative_int_env,
 )
+from collector.network_observation import network_observation_from_payload
 from metrics_api import MetricsLogReader, parse_timestamp_to_epoch
 from metrics_liveness import settings_from_env
 
@@ -77,15 +76,12 @@ METRICS_WINDOW_MAX_ITEMS = parse_non_negative_int_env("METRICS_WINDOW_MAX_ITEMS"
 LLM_INTEGRATED = False
 ACTION_EXECUTION_MODE = "audit-only-stub"
 ACTION_MUTATION_PIPELINE_ENABLED = False
-# Transport descriptor is intentionally static — it is architectural metadata,
-# not runtime-tunable configuration. "current" reflects what the collector
-# ingests today; "target" is the SC-RIC integration goal (see CLAUDE.md
-# "Target direction" for the phased plan). ZMQ was the old D1 target and has
-# been retired — E2AP is not ZMQ.
+# Transport descriptor is intentionally static architectural metadata. The PoC
+# only ingests local srsRAN WebSocket metrics; no external transport target is
+# advertised by this API.
 TRANSPORT_DESCRIPTOR: Dict[str, str] = {
     "current": "websocket",
-    "target": "e2ap-kpm",
-    "target_platform": "o-ran-sc-ric",
+    "mode": "local-store",
 }
 _AUDIT_SCHEMA_READY = False
 _AUDIT_DB_LOCK = threading.Lock()
@@ -604,245 +600,6 @@ def _window_metrics(
     return items
 
 
-# ── Section: Prometheus Exposition ────────────────────────────────────────────
-#
-# /metrics_prom renders the OpenMetrics/Prometheus text exposition format on top
-# of the existing snapshot cache.  It is a read-only view: it must never mutate
-# the alert lifecycle table (Prometheus scrapes every 15 s by default and that
-# would cause spurious first_seen_at / cleared_at transitions), so alert counts
-# are computed from _compute_current_alert_candidates (pure function), not from
-# _sync_alert_lifecycle.
-#
-# No prometheus_client dependency — the exposition format is a small, stable
-# text contract; hand-rolling it keeps requirements.txt tight and auditable.
-
-
-_PROM_LABEL_ESCAPES = str.maketrans({"\\": "\\\\", "\n": "\\n", '"': '\\"'})
-
-
-def _prom_escape_label(value: Any) -> str:
-    return str(value).translate(_PROM_LABEL_ESCAPES)
-
-
-def _prom_format_labels(labels: Dict[str, Any]) -> str:
-    pairs = [
-        f'{key}="{_prom_escape_label(value)}"'
-        for key, value in labels.items()
-        if value is not None and value != ""
-    ]
-    if not pairs:
-        return ""
-    return "{" + ",".join(pairs) + "}"
-
-
-def _prom_format_sample(name: str, labels: Dict[str, Any], value: Any) -> Optional[str]:
-    try:
-        numeric = float(value)
-    except (TypeError, ValueError):
-        return None
-
-    if numeric != numeric:  # NaN
-        numeric_str = "NaN"
-    elif numeric == float("inf"):
-        numeric_str = "+Inf"
-    elif numeric == float("-inf"):
-        numeric_str = "-Inf"
-    else:
-        numeric_str = repr(numeric)
-
-    return f"{name}{_prom_format_labels(labels)} {numeric_str}"
-
-
-def _render_prometheus_exposition() -> str:
-    snapshot, sample_epochs = _cached_snapshot()
-    now_epoch = time.time()
-
-    sections: List[tuple[str, str, str, List[str]]] = []
-    # Each tuple is (name, help, type, samples). Samples are the already-rendered
-    # lines; empty lists are suppressed so consumers don't see orphan HELP/TYPE.
-
-    fresh_samples: List[str] = []
-    age_samples: List[str] = []
-    sequence_samples: List[str] = []
-    entity_count_samples: List[str] = []
-    dl_samples: List[str] = []
-    ul_samples: List[str] = []
-    throughput_samples: List[str] = []
-    pusch_snr_samples: List[str] = []
-
-    for source_id in sorted(snapshot.keys()):
-        source_entry = snapshot[source_id]
-        source_labels = {"source_id": source_id}
-
-        sample_epoch = sample_epochs.get(source_id)
-        age = (now_epoch - sample_epoch) if sample_epoch is not None else None
-        fresh_value = 1.0 if age is not None and age <= ALERT_STALE_AFTER_SECONDS else 0.0
-        sample_line = _prom_format_sample("gnb_source_fresh", source_labels, fresh_value)
-        if sample_line is not None:
-            fresh_samples.append(sample_line)
-
-        if age is not None:
-            age_line = _prom_format_sample("gnb_source_last_sample_age_seconds", source_labels, age)
-            if age_line is not None:
-                age_samples.append(age_line)
-
-        sequence = source_entry.get("sequence")
-        if sequence is not None:
-            seq_line = _prom_format_sample("gnb_source_sequence", source_labels, sequence)
-            if seq_line is not None:
-                sequence_samples.append(seq_line)
-
-        entities = source_entry.get("entities") or []
-        count_line = _prom_format_sample("gnb_source_entities", source_labels, len(entities))
-        if count_line is not None:
-            entity_count_samples.append(count_line)
-
-        for entity in entities:
-            ue_metrics = entity.get("ue") or {}
-            if not isinstance(ue_metrics, dict):
-                continue
-
-            ue_labels = {
-                "source_id": source_id,
-                "cell_index": entity.get("cell_index"),
-                "pci": entity.get("pci"),
-                "ue_identity": entity.get("ue_identity"),
-            }
-
-            dl = ue_metrics.get("dl_brate")
-            ul = ue_metrics.get("ul_brate")
-
-            if isinstance(dl, (int, float)):
-                line = _prom_format_sample("gnb_ue_dl_brate_bps", ue_labels, dl)
-                if line is not None:
-                    dl_samples.append(line)
-            if isinstance(ul, (int, float)):
-                line = _prom_format_sample("gnb_ue_ul_brate_bps", ue_labels, ul)
-                if line is not None:
-                    ul_samples.append(line)
-            if isinstance(dl, (int, float)) and isinstance(ul, (int, float)):
-                line = _prom_format_sample(
-                    "gnb_ue_throughput_mbps", ue_labels, (float(dl) + float(ul)) / 1_000_000.0
-                )
-                if line is not None:
-                    throughput_samples.append(line)
-
-            snr = ue_metrics.get("pusch_snr_db")
-            if isinstance(snr, (int, float)):
-                line = _prom_format_sample("gnb_ue_pusch_snr_db", ue_labels, snr)
-                if line is not None:
-                    pusch_snr_samples.append(line)
-
-    sections.append(
-        (
-            "gnb_source_fresh",
-            "1 if the latest sample for the source is within ALERT_STALE_AFTER_SECONDS, else 0.",
-            "gauge",
-            fresh_samples,
-        )
-    )
-    sections.append(
-        (
-            "gnb_source_last_sample_age_seconds",
-            "Age in seconds of the most recent sample observed per source.",
-            "gauge",
-            age_samples,
-        )
-    )
-    sections.append(
-        (
-            "gnb_source_sequence",
-            "Monotonic counter of cells-family events ingested per source.",
-            "gauge",
-            sequence_samples,
-        )
-    )
-    sections.append(
-        (
-            "gnb_source_entities",
-            "Number of UE entities in the latest snapshot per source.",
-            "gauge",
-            entity_count_samples,
-        )
-    )
-    sections.append(
-        (
-            "gnb_ue_dl_brate_bps",
-            "Latest downlink bitrate per UE, in bits per second.",
-            "gauge",
-            dl_samples,
-        )
-    )
-    sections.append(
-        (
-            "gnb_ue_ul_brate_bps",
-            "Latest uplink bitrate per UE, in bits per second.",
-            "gauge",
-            ul_samples,
-        )
-    )
-    sections.append(
-        (
-            "gnb_ue_throughput_mbps",
-            "Latest combined DL+UL throughput per UE, in Mbps.",
-            "gauge",
-            throughput_samples,
-        )
-    )
-    sections.append(
-        (
-            "gnb_ue_pusch_snr_db",
-            "Latest PUSCH SNR per UE in dB, when reported by the source.",
-            "gauge",
-            pusch_snr_samples,
-        )
-    )
-
-    alert_candidates = _compute_current_alert_candidates(snapshot, sample_epochs, now_epoch)
-    alert_counts: Dict[str, int] = {}
-    for alert in alert_candidates:
-        alert_type = str(alert.get("type", "unknown"))
-        alert_counts[alert_type] = alert_counts.get(alert_type, 0) + 1
-
-    alert_samples: List[str] = []
-    for alert_type in sorted(alert_counts.keys()):
-        line = _prom_format_sample("gnb_alerts_open", {"type": alert_type}, alert_counts[alert_type])
-        if line is not None:
-            alert_samples.append(line)
-
-    sections.append(
-        (
-            "gnb_alerts_open",
-            "Current open alerts by type computed from the latest snapshot; read-only.",
-            "gauge",
-            alert_samples,
-        )
-    )
-
-    uptime_sample = _prom_format_sample(
-        "gnb_api_uptime_seconds", {}, max(0.0, time.monotonic() - _SERVICE_START_MONOTONIC)
-    )
-    sections.append(
-        (
-            "gnb_api_uptime_seconds",
-            "Uptime of the metrics REST API process in seconds.",
-            "gauge",
-            [uptime_sample] if uptime_sample is not None else [],
-        )
-    )
-
-    lines: List[str] = []
-    for name, help_text, metric_type, samples in sections:
-        if not samples:
-            continue
-        lines.append(f"# HELP {name} {help_text}")
-        lines.append(f"# TYPE {name} {metric_type}")
-        lines.extend(samples)
-
-    lines.append("")  # trailing newline per exposition convention
-    return "\n".join(lines)
-
-
 # ── Section: Route Handlers ───────────────────────────────────────────────────
 
 
@@ -882,7 +639,10 @@ def get_metrics(
         return response
 
     snapshot, _ = _cached_snapshot()
-    items: List[Dict[str, Any]] = []
+
+    cells_out: List[Dict[str, Any]] = []
+    ues_out: List[Dict[str, Any]] = []
+    latest_timestamp: Optional[str] = None
 
     for sid, source_entry in snapshot.items():
         if source_id is not None and sid != source_id:
@@ -891,25 +651,81 @@ def get_metrics(
         entities = source_entry.get("entities") or []
         if cell_id is not None:
             entities = [entity for entity in entities if _entity_matches_cell(entity, cell_id)]
-            if not entities:
+        if not entities:
+            continue
+
+        source_payload = source_entry.get("payload")
+        if isinstance(source_payload, dict):
+            observation = network_observation_from_payload(
+                source_payload,
+                timestamp=source_entry.get("timestamp"),
+            )
+        else:
+            # Older SQLite rows may not have raw payloads. Rebuild a minimal
+            # srsRAN-shaped cells payload from persisted per-UE entities so the
+            # srsRAN parser runs and dl_brate/ul_brate fields survive.
+            cells_by_index: Dict[int, List[Dict[str, Any]]] = {}
+            for entity in entities:
+                ue = entity.get("ue")
+                if not isinstance(ue, dict):
+                    continue
+                idx = int(entity.get("cell_index") or 0)
+                cells_by_index.setdefault(idx, []).append(ue)
+            if not cells_by_index:
                 continue
 
-        items.append(
-            {
-                "source_id": sid,
-                "timestamp": source_entry.get("timestamp"),
-                "collector_timestamp": source_entry.get("collector_timestamp"),
-                "sequence": source_entry.get("sequence"),
-                "entities": entities,
-            }
-        )
+            observation = network_observation_from_payload(
+                {
+                    "timestamp": source_entry.get("timestamp"),
+                    "cells": [
+                        {"cell_metrics": {}, "ue_list": ues}
+                        for _, ues in sorted(cells_by_index.items())
+                    ],
+                },
+                timestamp=source_entry.get("timestamp"),
+            )
+        if observation is None:
+            continue
+
+        # metric_availability is a debugging aid in the agent stream; strip it from the
+        # API response so /metrics matches the network-observation.v1 contract exactly.
+        observation.pop("metric_availability", None)
+
+        # The OAI observation builder always labels its single cell as "cell-0".
+        # When we merge across sources (multi-gNB), rewrite each cell_id to be
+        # globally unique so an agent can correlate UE→cell→source. Format:
+        # "<source_id>-<original_cell_id>".
+        cell_id_remap: Dict[str, str] = {}
+        for cell in observation.get("cells") or []:
+            original = cell.get("cell_id")
+            if original is None:
+                continue
+            new_id = f"{sid}-{original}"
+            cell_id_remap[original] = new_id
+            cell["cell_id"] = new_id
+        for ue in observation.get("ues") or []:
+            original = ue.get("cell_id")
+            if original in cell_id_remap:
+                ue["cell_id"] = cell_id_remap[original]
+
+        cells_out.extend(observation.get("cells") or [])
+        ues_out.extend(observation.get("ues") or [])
+        observation_timestamp = observation.get("timestamp")
+        if latest_timestamp is None:
+            latest_timestamp = observation_timestamp
+        else:
+            observation_epoch = parse_timestamp_to_epoch(observation_timestamp) or float("-inf")
+            latest_epoch = parse_timestamp_to_epoch(latest_timestamp) or float("-inf")
+            if observation_epoch > latest_epoch:
+                latest_timestamp = observation_timestamp
 
     return {
-        "schema_version": API_SCHEMA_VERSION,
+        "schema_version": "network-observation.v1",
         "mode": "latest-snapshot",
-        "transport": _transport_metadata(),
-        "count": len(items),
-        "items": items,
+        "count": len(ues_out),
+        "timestamp": latest_timestamp,
+        "cells": cells_out,
+        "ues": ues_out,
     }
 
 
@@ -1031,15 +847,6 @@ def get_capabilities() -> Dict[str, Any]:
             "min_ul_brate": ALERT_MIN_UL_BRATE,  # -1.0 = disabled
         },
     }
-
-
-@app.get("/metrics_prom", response_class=PlainTextResponse)
-def get_metrics_prom() -> PlainTextResponse:
-    body = _render_prometheus_exposition()
-    return PlainTextResponse(
-        content=body,
-        media_type="text/plain; version=0.0.4; charset=utf-8",
-    )
 
 
 @app.post("/query")

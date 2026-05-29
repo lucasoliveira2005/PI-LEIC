@@ -183,21 +183,6 @@ jobs:
           body=$(curl -fsS "http://127.0.0.1:8000/alerts?status=open")
           echo "$body" | python -c "import json,sys; d=json.load(sys.stdin); types=[i.get('type') for i in d['items']]; assert 'stale-source' in types, d; print('stale-source present')"
 
-      - name: Verify /metrics_prom emits exposition and does not mutate alert lifecycle
-        run: |
-          before=$(curl -fsS "http://127.0.0.1:8000/alerts?status=all" | python -c "import json,sys; print(len(json.load(sys.stdin)['items']))")
-          curl -fsS http://127.0.0.1:8000/metrics_prom > var/prom.txt
-          grep -q '^# TYPE gnb_source_fresh gauge$' var/prom.txt
-          grep -q '^# TYPE gnb_ue_dl_brate_bps gauge$' var/prom.txt
-          grep -q '^gnb_alerts_open{type="stale-source"} ' var/prom.txt
-          for _ in 1 2 3; do curl -fsS http://127.0.0.1:8000/metrics_prom > /dev/null; done
-          after=$(curl -fsS "http://127.0.0.1:8000/alerts?status=all" | python -c "import json,sys; print(len(json.load(sys.stdin)['items']))")
-          if [ "$before" != "$after" ]; then
-            echo "Alert count changed after Prometheus scrapes: before=$before after=$after" >&2
-            exit 1
-          fi
-          echo "Prometheus scrapes preserved alert lifecycle (count=$before)"
-
       - name: Stop API
         if: always()
         run: |

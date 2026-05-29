@@ -1,14 +1,9 @@
-"""Transport adapters: WebSocket source connection.
-
-The current ingestion transport is WebSocket (srsRAN's JSON metrics server).
-The target transport for SC-RIC integration is E2AP/KPM — not ZMQ. A KPM
-adapter will be added in Phase 1; until then the factory only returns the
-WebSocket adapter. Do not add speculative transport implementations here.
-"""
+"""Transport adapters for metrics sources."""
 
 from __future__ import annotations
 
 import threading
+import json
 from typing import Any, Callable, Dict, Optional
 
 import websocket
@@ -17,6 +12,7 @@ from .config import (
     METRICS_WS_PING_INTERVAL_SECONDS,
     METRICS_WS_PING_TIMEOUT_SECONDS,
 )
+from .oai_mac_stats import parse_oai_mac_stats_text
 
 
 def websocket_keepalive_kwargs() -> Dict[str, Any]:
@@ -86,11 +82,57 @@ class WebSocketSourceAdapter(SourceTransportAdapter):
                 pass
 
 
+class OaiMacStatsFileAdapter(SourceTransportAdapter):
+    """Poll and parse an OAI ``nrMAC_stats.log`` file."""
+
+    def __init__(self, source: Dict[str, Any]):
+        self.source = source
+        self._stop_event = threading.Event()
+        self._last_signature: Optional[str] = None
+
+    def run_once(
+        self,
+        on_open: Callable[[Any], None],
+        on_message: Callable[[Any, str], None],
+        on_error: Callable[[Any, Any], None],
+        on_close: Callable[[Any, Any, Any], None],
+    ) -> None:
+        on_open(None)
+        log_path = self.source["log_path"]
+        poll_seconds = float(self.source.get("poll_seconds", 1.0) or 1.0)
+
+        while not self._stop_event.is_set():
+            try:
+                with open(log_path, "r", encoding="utf-8", errors="replace") as handle:
+                    text = handle.read()
+                payload = parse_oai_mac_stats_text(text)
+                if payload is not None:
+                    signature = str(payload.get("oai_mac_stats"))
+                    if signature != self._last_signature:
+                        self._last_signature = signature
+                        on_message(None, json.dumps(payload, ensure_ascii=False))
+            except FileNotFoundError as exc:
+                on_error(None, exc)
+            except Exception as exc:
+                on_error(None, exc)
+
+            self._stop_event.wait(max(0.1, poll_seconds))
+
+        on_close(None, None, "stopped")
+
+    def stop(self) -> None:
+        self._stop_event.set()
+
+
 def build_transport_adapter(source: Dict[str, Any]) -> SourceTransportAdapter:
     """Build the transport adapter for *source*.
 
-    WebSocket is the only supported backend. The future E2SM KPM adapter
-    (Phase 1) will be added as a sibling subclass and this factory will gain
-    source-type dispatch at that point.
+    ``websocket_json`` is the srsRAN fallback; ``oai_mac_stats`` is the
+    OAI-first path.
     """
-    return WebSocketSourceAdapter(source)
+    transport = str(source.get("transport") or "websocket_json")
+    if transport == "websocket_json":
+        return WebSocketSourceAdapter(source)
+    if transport == "oai_mac_stats":
+        return OaiMacStatsFileAdapter(source)
+    raise ValueError(f"Unsupported source transport: {transport}")

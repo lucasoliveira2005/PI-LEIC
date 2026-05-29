@@ -9,7 +9,12 @@ src/.venv/
 /metrics/*
 !/metrics/.gitkeep
 *.sqlite
+*.sqlite-shm
+*.sqlite-wal
 var/
+nr*_stats*.log
+src/nr*_stats*.log
+src/metrics/
 src/.launch_stack_runtime/
 
 # Vendored srsRAN build tree (built locally, not tracked)

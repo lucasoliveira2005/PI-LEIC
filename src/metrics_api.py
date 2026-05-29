@@ -195,7 +195,7 @@ class MetricsLogReader:
             FROM metrics_events AS e
             JOIN metrics_cell_entities AS ce
               ON ce.event_id = e.id
-            WHERE e.metric_family = 'cells'
+            WHERE e.metric_family IN ('cells', 'oai_mac_stats')
               AND (? IS NULL OR COALESCE(e.event_timestamp, e.collector_timestamp) >= ?)
               AND (? IS NULL OR COALESCE(e.event_timestamp, e.collector_timestamp) <= ?)
             ORDER BY COALESCE(e.event_timestamp, e.collector_timestamp) ASC,
@@ -289,6 +289,7 @@ class MetricsLogReader:
                 ),
                 "collector_timestamp": entry.get("collector_timestamp"),
                 "sequence": sequence_by_source[source_id],
+                "payload": payload,
                 "entities": entities,
             }
 
@@ -312,7 +313,7 @@ class MetricsLogReader:
                     MAX(id) AS latest_id,
                     COUNT(*) AS source_sequence
                 FROM metrics_events
-                WHERE metric_family = 'cells'
+                WHERE metric_family IN ('cells', 'oai_mac_stats')
                 GROUP BY source_id
             )
             SELECT
@@ -324,7 +325,8 @@ class MetricsLogReader:
                 ce.ue_index,
                 ce.ue_identity,
                 ce.pci,
-                ce.ue_json
+                ce.ue_json,
+                e.raw_json
             FROM source_aggregates AS sa
             JOIN metrics_events AS e
               ON e.id = sa.latest_id
@@ -350,16 +352,27 @@ class MetricsLogReader:
             ue_identity,
             pci,
             ue_json,
+            raw_json,
         ) in rows:
-            source_entry = latest_by_source.setdefault(
-                source_id,
-                {
+            if source_id not in latest_by_source:
+                payload: Dict[str, Any] = {}
+                try:
+                    raw_event = json.loads(raw_json) if raw_json else {}
+                except json.JSONDecodeError:
+                    raw_event = {}
+                if isinstance(raw_event, dict):
+                    extracted_payload = extract_payload(raw_event)
+                    if isinstance(extracted_payload, dict):
+                        payload = extracted_payload
+                latest_by_source[source_id] = {
                     "timestamp": event_timestamp or collector_timestamp,
                     "collector_timestamp": collector_timestamp,
                     "sequence": int(source_sequence or 0),
+                    "payload": payload,
                     "entities": [],
-                },
-            )
+                }
+
+            source_entry = latest_by_source[source_id]
 
             try:
                 ue_metrics = json.loads(ue_json) if ue_json else {}
@@ -392,7 +405,7 @@ class MetricsLogReader:
             query = """
                 SELECT source_id, COUNT(*) AS source_sequence
                 FROM metrics_events
-                WHERE metric_family = 'cells'
+                WHERE metric_family IN ('cells', 'oai_mac_stats')
                 GROUP BY source_id
             """
 

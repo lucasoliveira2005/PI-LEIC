@@ -8,6 +8,33 @@ ACTION="start"
 MODE="${MODE:-supervised}"
 LOG_TARGET=""
 DRY_RUN="${DRY_RUN:-0}"
+RAN_BACKEND="${RAN_BACKEND:-oai}"
+case "$RAN_BACKEND" in
+  oai|oran|openairinterface)
+    RAN_BACKEND="oai"
+    ;;
+  srsran)
+    ;;
+  *)
+    echo "Unsupported RAN_BACKEND: $RAN_BACKEND" >&2
+    echo "Supported values: oai, oran, openairinterface, srsran" >&2
+    exit 1
+    ;;
+esac
+
+if [[ "$RAN_BACKEND" == "oai" ]]; then
+  DEFAULT_METRICS_SOURCES_CONFIG="$SCRIPT_DIR/../config/metrics_sources_oai.json"
+  DEFAULT_GNB_BIN="nr-softmodem"
+  DEFAULT_UE_BIN="nr-uesoftmodem"
+  DEFAULT_GNB_CONFIGS="$SCRIPT_DIR/../config/oai/gnb.sa.band78.rfsim.conf:$SCRIPT_DIR/../config/oai/gnb2.sa.band78.rfsim.conf"
+  DEFAULT_UE_CONFIGS="$SCRIPT_DIR/../config/oai/nrue.rfsim.launch.conf:$SCRIPT_DIR/../config/oai/nrue2.rfsim.launch.conf"
+else
+  DEFAULT_METRICS_SOURCES_CONFIG="$SCRIPT_DIR/../config/metrics_sources.json"
+  DEFAULT_GNB_BIN="gnb"
+  DEFAULT_UE_BIN="srsue"
+  DEFAULT_GNB_CONFIGS="$SCRIPT_DIR/../config/gnb_gnb1_zmq.yaml:$SCRIPT_DIR/../config/gnb_gnb2_zmq.yaml"
+  DEFAULT_UE_CONFIGS="$SCRIPT_DIR/../config/ue1_zmq.conf.txt:$SCRIPT_DIR/../config/ue2_zmq.conf.txt"
+fi
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
 VENV_DIR="${VENV_DIR:-}"
@@ -15,8 +42,9 @@ REQUIREMENTS_FILE="${REQUIREMENTS_FILE:-$SCRIPT_DIR/../requirements.txt}"
 METRICS_SCRIPT="${METRICS_SCRIPT:-metrics_collector.py}"
 DASHBOARD_SCRIPT="${DASHBOARD_SCRIPT:-dashboard.py}"
 API_SCRIPT="${API_SCRIPT:-metrics_rest_api.py}"
-METRICS_SOURCES_CONFIG="${METRICS_SOURCES_CONFIG:-$SCRIPT_DIR/../config/metrics_sources.json}"
+METRICS_SOURCES_CONFIG="${METRICS_SOURCES_CONFIG:-$DEFAULT_METRICS_SOURCES_CONFIG}"
 METRICS_OUT="${METRICS_OUT:-$SCRIPT_DIR/../metrics/gnb_metrics.jsonl}"
+METRICS_AGENT_OUT="${METRICS_AGENT_OUT:-$SCRIPT_DIR/../metrics/agent_network_observations.jsonl}"
 METRICS_LOG_INCLUDE_ROTATED="${METRICS_LOG_INCLUDE_ROTATED:-1}"
 METRICS_LOG_MAX_ARCHIVES="${METRICS_LOG_MAX_ARCHIVES:-5}"
 METRICS_SQLITE_ENABLED="${METRICS_SQLITE_ENABLED:-1}"
@@ -24,10 +52,12 @@ METRICS_SQLITE_PATH="${METRICS_SQLITE_PATH:-/tmp/pi-leic-metrics.sqlite}"
 FRESHNESS_CHECK_MODE="${FRESHNESS_CHECK_MODE:-hybrid}"
 FRESHNESS_AGE_WINDOW_SECONDS="${FRESHNESS_AGE_WINDOW_SECONDS:-15}"
 FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS="${FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS:-2}"
-GNB_BIN="${GNB_BIN:-gnb}"
-UE_BIN="${UE_BIN:-srsue}"
-GNB_CONFIGS="${GNB_CONFIGS:-$SCRIPT_DIR/../config/gnb_gnb1_zmq.yaml:$SCRIPT_DIR/../config/gnb_gnb2_zmq.yaml}"
-UE_CONFIGS="${UE_CONFIGS:-$SCRIPT_DIR/../config/ue1_zmq.conf.txt:$SCRIPT_DIR/../config/ue2_zmq.conf.txt}"
+GNB_BIN="${GNB_BIN:-$DEFAULT_GNB_BIN}"
+UE_BIN="${UE_BIN:-$DEFAULT_UE_BIN}"
+GNB_CONFIGS="${GNB_CONFIGS:-$DEFAULT_GNB_CONFIGS}"
+UE_CONFIGS="${UE_CONFIGS:-$DEFAULT_UE_CONFIGS}"
+OAI_GNB_EXTRA_ARGS="${OAI_GNB_EXTRA_ARGS:---rfsim}"
+OAI_UE_EXTRA_ARGS="${OAI_UE_EXTRA_ARGS:---rfsim --rfsimulator.serveraddr 127.0.0.1}"
 MPLCONFIGDIR_PATH="${MPLCONFIGDIR_PATH:-/tmp/pi-leic-matplotlib}"
 DASHBOARD_ENABLED="${DASHBOARD_ENABLED:-1}"
 API_ENABLED="${API_ENABLED:-1}"
@@ -121,8 +151,9 @@ Options:
   --help           Show this message.
 
 Environment overrides:
-  WORKDIR, MODE, PYTHON_BIN, VENV_DIR, REQUIREMENTS_FILE, METRICS_SCRIPT, DASHBOARD_SCRIPT, API_SCRIPT
-  METRICS_SOURCES_CONFIG, METRICS_OUT, GNB_BIN, UE_BIN, GNB_CONFIGS, UE_CONFIGS
+  WORKDIR, MODE, RAN_BACKEND, PYTHON_BIN, VENV_DIR, REQUIREMENTS_FILE, METRICS_SCRIPT, DASHBOARD_SCRIPT, API_SCRIPT
+  METRICS_SOURCES_CONFIG, METRICS_OUT, METRICS_AGENT_OUT, GNB_BIN, UE_BIN, GNB_CONFIGS, UE_CONFIGS
+  OAI_GNB_EXTRA_ARGS, OAI_UE_EXTRA_ARGS
   METRICS_LOG_INCLUDE_ROTATED, METRICS_LOG_MAX_ARCHIVES
   METRICS_SQLITE_ENABLED, METRICS_SQLITE_PATH
   FRESHNESS_CHECK_MODE, FRESHNESS_AGE_WINDOW_SECONDS
@@ -527,6 +558,7 @@ start_supervised_stack() {
   local gnb_label
   local ue_label
   local ue_netns
+  local ue_arg
   local ue_script
   local start_line
   local amf_log_start_line
@@ -535,6 +567,8 @@ start_supervised_stack() {
   local -a collector_args
   local -a api_args
   local -a dashboard_args
+  local -a gnb_args
+  local -a ue_args
 
   if [[ "$DRY_RUN" != "1" ]]; then
     require_sudo_session
@@ -573,8 +607,10 @@ start_supervised_stack() {
 
   collector_unit="$(user_unit_name "metrics-collector")"
   collector_args=(
+    "--setenv=RAN_BACKEND=$RAN_BACKEND"
     "--setenv=METRICS_SOURCES_CONFIG=$METRICS_SOURCES_CONFIG_PATH"
     "--setenv=METRICS_OUT=$METRICS_OUT_PATH"
+    "--setenv=METRICS_AGENT_OUT=$METRICS_AGENT_OUT_PATH"
     "--setenv=METRICS_SQLITE_ENABLED=$METRICS_SQLITE_ENABLED"
     "--setenv=METRICS_SQLITE_PATH=$METRICS_SQLITE_PATH"
     "$VENV_DIR_PATH/bin/python"
@@ -641,21 +677,111 @@ start_supervised_stack() {
 
   for gnb_config in "${GNB_CONFIG_PATHS[@]}"; do
     gnb_label="$(config_label "$gnb_config")"
-    start_root_unit \
-      "$(root_unit_name "gnb-$gnb_label")" \
-      "PI-LEIC gNB $gnb_label" \
-      "$GNB_BIN_RESOLVED" -c "$gnb_config"
+    if [[ "$RAN_BACKEND" == "oai" ]]; then
+      # Each OAI gNB writes nrMAC_stats.log (hard-coded relative path) and
+      # nrRRC_stats.log to its CWD; give each its own directory so a second
+      # gNB does not overwrite the first.
+      local gnb_workdir="$WORKDIR/../metrics/oran/$gnb_label"
+      read -r -a gnb_args <<< "$OAI_GNB_EXTRA_ARGS"
+      printf -v gnb_script \
+        'mkdir -p %q && cd %q && exec %q -O %q' \
+        "$gnb_workdir" \
+        "$gnb_workdir" \
+        "$GNB_BIN_RESOLVED" \
+        "$gnb_config"
+      for gnb_arg in "${gnb_args[@]}"; do
+        printf -v gnb_script '%s %q' "$gnb_script" "$gnb_arg"
+      done
+      start_root_unit \
+        "$(root_unit_name "gnb-$gnb_label")" \
+        "PI-LEIC gNB $gnb_label" \
+        /bin/bash -lc "$gnb_script"
+    else
+      gnb_args=(-c "$gnb_config")
+      start_root_unit \
+        "$(root_unit_name "gnb-$gnb_label")" \
+        "PI-LEIC gNB $gnb_label" \
+        "$GNB_BIN_RESOLVED" "${gnb_args[@]}"
+    fi
   done
 
   for ue_config in "${UE_CONFIG_PATHS[@]}"; do
     ue_label="$(config_label "$ue_config")"
     ue_netns="$(read_netns "$ue_config")"
-    printf -v ue_script \
-      'ip netns del %q 2>/dev/null || true; ip netns add %q; exec %q %q' \
-      "$ue_netns" \
-      "$ue_netns" \
-      "$UE_BIN_RESOLVED" \
-      "$ue_config"
+    if [[ "$RAN_BACKEND" == "oai" ]]; then
+      # Per-UE OAI config (IMSI/K/OPC + RFsim port) comes from the shim's
+      # ue_config key; the launcher prepends `-O <abs_path>` so OAI_UE_EXTRA_ARGS
+      # stays the common RF args (--rfsim, -r, --band, -C, --ssb).
+      local ue_oai_config
+      ue_oai_config="$(read_ue_config "$ue_config")"
+      if [[ -z "$ue_oai_config" ]]; then
+        echo "Missing 'ue_config' in OAI UE launch shim: $ue_config" >&2
+        return 1
+      fi
+      # Resolve relative ue_config against the shim's own directory, not WORKDIR.
+      if [[ "$ue_oai_config" != /* ]]; then
+        ue_oai_config="$(dirname -- "$ue_config")/$ue_oai_config"
+      fi
+      read -r -a ue_args <<< "$OAI_UE_EXTRA_ARGS"
+
+      # OAI nr-uesoftmodem writes nrL1_UE_stats-0.log (and similar) to its CWD
+      # with hard-coded relative paths. Give each UE its own directory under
+      # metrics/oran/ so the logs don't land in the launcher's CWD.
+      local ue_workdir="$WORKDIR/../metrics/oran/ue-$ue_label"
+
+      # When the shim declares veth IPs, run the UE inside its netns and create a
+      # veth pair so the UE can reach the gNB's RFsim server. This isolates each
+      # UE's `oaitun_ue1` TUN — OAI hard-codes the TUN name per process, so two
+      # UEs in the host netns would collide. With per-UE netns, each gets its
+      # own `oaitun_ue1` (independent interface inside its own namespace).
+      local ue_veth_host_ip ue_veth_ns_ip
+      ue_veth_host_ip="$(read_veth_host_ip "$ue_config")"
+      ue_veth_ns_ip="$(read_veth_ns_ip "$ue_config")"
+      if [[ -n "$ue_veth_host_ip" && -n "$ue_veth_ns_ip" ]]; then
+        local veth_host_ifname="vh-$ue_netns"
+        local veth_ns_ifname="vp-$ue_netns"
+        local ue_exec_cmd
+        printf -v ue_exec_cmd 'exec ip netns exec %q %q -O %q' \
+          "$ue_netns" "$UE_BIN_RESOLVED" "$ue_oai_config"
+        for ue_arg in "${ue_args[@]}"; do
+          printf -v ue_exec_cmd '%s %q' "$ue_exec_cmd" "$ue_arg"
+        done
+        printf -v ue_script \
+          'set -e; mkdir -p %q; cd %q; ip netns del %q 2>/dev/null || true; ip link del %q 2>/dev/null || true; ip netns add %q; ip link add %q type veth peer name %q; ip link set %q netns %q; ip addr add %s/30 dev %q; ip link set %q up; ip netns exec %q ip addr add %s/30 dev %q; ip netns exec %q ip link set %q up; ip netns exec %q ip link set lo up; %s' \
+          "$ue_workdir" \
+          "$ue_workdir" \
+          "$ue_netns" \
+          "$veth_host_ifname" \
+          "$ue_netns" \
+          "$veth_host_ifname" "$veth_ns_ifname" \
+          "$veth_ns_ifname" "$ue_netns" \
+          "$ue_veth_host_ip" "$veth_host_ifname" \
+          "$veth_host_ifname" \
+          "$ue_netns" "$ue_veth_ns_ip" "$veth_ns_ifname" \
+          "$ue_netns" "$veth_ns_ifname" \
+          "$ue_netns" \
+          "$ue_exec_cmd"
+      else
+        printf -v ue_script \
+          'mkdir -p %q && cd %q && ip netns del %q 2>/dev/null || true; ip netns add %q; exec %q -O %q' \
+          "$ue_workdir" \
+          "$ue_workdir" \
+          "$ue_netns" \
+          "$ue_netns" \
+          "$UE_BIN_RESOLVED" \
+          "$ue_oai_config"
+        for ue_arg in "${ue_args[@]}"; do
+          printf -v ue_script '%s %q' "$ue_script" "$ue_arg"
+        done
+      fi
+    else
+      printf -v ue_script \
+        'ip netns del %q 2>/dev/null || true; ip netns add %q; exec %q %q' \
+        "$ue_netns" \
+        "$ue_netns" \
+        "$UE_BIN_RESOLVED" \
+        "$ue_config"
+    fi
     start_root_unit \
       "$(root_unit_name "ue-$ue_label")" \
       "PI-LEIC UE $ue_label" \
@@ -726,8 +852,10 @@ EOF
   collector_command="$(
     cat <<EOF
 cd '$WORKDIR'
+export RAN_BACKEND='$RAN_BACKEND'
 export METRICS_SOURCES_CONFIG='$METRICS_SOURCES_CONFIG_PATH'
 export METRICS_OUT='$METRICS_OUT_PATH'
+export METRICS_AGENT_OUT='$METRICS_AGENT_OUT_PATH'
 export METRICS_SQLITE_ENABLED='$METRICS_SQLITE_ENABLED'
 export METRICS_SQLITE_PATH='$METRICS_SQLITE_PATH'
 '$VENV_DIR_PATH/bin/python' -u '$METRICS_SCRIPT_PATH'
@@ -761,12 +889,21 @@ EOF
 
   for gnb_config in "${GNB_CONFIG_PATHS[@]}"; do
     gnb_title="gNB $(config_label "$gnb_config")"
-    gnb_command="$(
-      cat <<EOF
+    if [[ "$RAN_BACKEND" == "oai" ]]; then
+      gnb_command="$(
+        cat <<EOF
+cd '$WORKDIR'
+sudo -n '$GNB_BIN_RESOLVED' -O '$gnb_config' $OAI_GNB_EXTRA_ARGS
+EOF
+      )"
+    else
+      gnb_command="$(
+        cat <<EOF
 cd '$WORKDIR'
 sudo -n '$GNB_BIN_RESOLVED' -c '$gnb_config'
 EOF
-    )"
+      )"
+    fi
     open_terminal "$gnb_title" "$gnb_command"
   done
 
@@ -774,14 +911,61 @@ EOF
     ue_title="UE $(config_label "$ue_config")"
     ue_netns="$(read_netns "$ue_config")"
 
-    ue_command="$(
-      cat <<EOF
+    if [[ "$RAN_BACKEND" == "oai" ]]; then
+      local ue_oai_config_t
+      ue_oai_config_t="$(read_ue_config "$ue_config")"
+      if [[ -z "$ue_oai_config_t" ]]; then
+        echo "Missing 'ue_config' in OAI UE launch shim: $ue_config" >&2
+        return 1
+      fi
+      if [[ "$ue_oai_config_t" != /* ]]; then
+        ue_oai_config_t="$(dirname -- "$ue_config")/$ue_oai_config_t"
+      fi
+      # Per-UE workdir so OAI's nrL1_UE_stats-0.log doesn't land in the
+      # launcher's CWD.
+      local ue_workdir_t="$WORKDIR/../metrics/oran/ue-$(config_label "$ue_config")"
+      local ue_veth_host_ip_t ue_veth_ns_ip_t
+      ue_veth_host_ip_t="$(read_veth_host_ip "$ue_config")"
+      ue_veth_ns_ip_t="$(read_veth_ns_ip "$ue_config")"
+      if [[ -n "$ue_veth_host_ip_t" && -n "$ue_veth_ns_ip_t" ]]; then
+        ue_command="$(
+          cat <<EOF
+mkdir -p '$ue_workdir_t'
+cd '$ue_workdir_t'
+sudo -n ip netns del '$ue_netns' 2>/dev/null || true
+sudo -n ip link del 'vh-$ue_netns' 2>/dev/null || true
+sudo -n ip netns add '$ue_netns'
+sudo -n ip link add 'vh-$ue_netns' type veth peer name 'vp-$ue_netns'
+sudo -n ip link set 'vp-$ue_netns' netns '$ue_netns'
+sudo -n ip addr add '$ue_veth_host_ip_t/30' dev 'vh-$ue_netns'
+sudo -n ip link set 'vh-$ue_netns' up
+sudo -n ip netns exec '$ue_netns' ip addr add '$ue_veth_ns_ip_t/30' dev 'vp-$ue_netns'
+sudo -n ip netns exec '$ue_netns' ip link set 'vp-$ue_netns' up
+sudo -n ip netns exec '$ue_netns' ip link set lo up
+sudo -n ip netns exec '$ue_netns' '$UE_BIN_RESOLVED' -O '$ue_oai_config_t' $OAI_UE_EXTRA_ARGS
+EOF
+        )"
+      else
+        ue_command="$(
+          cat <<EOF
+mkdir -p '$ue_workdir_t'
+cd '$ue_workdir_t'
+sudo -n ip netns del '$ue_netns' 2>/dev/null || true
+sudo -n ip netns add '$ue_netns'
+sudo -n ip netns exec '$ue_netns' '$UE_BIN_RESOLVED' -O '$ue_oai_config_t' $OAI_UE_EXTRA_ARGS
+EOF
+        )"
+      fi
+    else
+      ue_command="$(
+        cat <<EOF
 cd '$WORKDIR'
 sudo -n ip netns del '$ue_netns' 2>/dev/null || true
 sudo -n ip netns add '$ue_netns'
 sudo -n '$UE_BIN_RESOLVED' '$ue_config'
 EOF
-    )"
+      )"
+    fi
     open_terminal "$ue_title" "$ue_command"
   done
 
@@ -901,6 +1085,7 @@ DASHBOARD_SCRIPT_PATH="$(resolve_path "$WORKDIR" "$DASHBOARD_SCRIPT")"
 API_SCRIPT_PATH="$(resolve_path "$WORKDIR" "$API_SCRIPT")"
 METRICS_SOURCES_CONFIG_PATH="$(resolve_path "$WORKDIR" "$METRICS_SOURCES_CONFIG")"
 METRICS_OUT_PATH="$(resolve_path "$WORKDIR" "$METRICS_OUT")"
+METRICS_AGENT_OUT_PATH="$(resolve_path "$WORKDIR" "$METRICS_AGENT_OUT")"
 VENV_DIR_PATH="$(resolve_path "$WORKDIR" "$VENV_DIR")"
 REPO_ROOT_PATH="$(cd -- "$(dirname -- "$METRICS_SOURCES_CONFIG_PATH")/.." && pwd)"
 

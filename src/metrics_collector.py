@@ -4,12 +4,13 @@
 The real implementation lives in:
   src/collector/config.py      — environment-variable configuration
   src/collector/enrichment.py  — event enrichment and D1 contract field derivation
-  src/collector/transport.py   — WebSocket source adapter (E2SM-KPM sibling lands in Phase 1)
+  src/collector/transport.py   — WebSocket source adapter
   src/collector/storage.py     — JSONL rotation (EventWriter) and SQLite sink
   src/collector/worker.py      — source worker threads, watchdog, main()
 """
 
 from collector import (  # noqa: F401
+    AGENT_OUT,
     METRICS_SCHEMA_VERSION,
     METRICS_SILENCE_THRESHOLD_SECONDS,
     METRICS_SQLITE_ENABLED,
@@ -24,12 +25,14 @@ from collector import (  # noqa: F401
     METRICS_WS_PING_INTERVAL_SECONDS,
     METRICS_WS_PING_TIMEOUT_SECONDS,
     OUT,
+    RAN_BACKEND,
     RECONNECT_SECONDS,
     ROTATE_MAX_BYTES,
     ROTATE_MAX_FILES,
     SOURCES_CONFIG,
     EventWriter,
     MetricsSourceWorker,
+    OaiMacStatsFileAdapter,
     SourceTransportAdapter,
     SQLiteEventSink,
     WebSocketSourceAdapter,

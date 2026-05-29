@@ -1,6 +1,7 @@
 """Metrics collector package — data-ingestion layer for the PI-LEIC platform."""
 
 from .config import (  # noqa: F401
+    AGENT_OUT,
     METRICS_SCHEMA_VERSION,
     METRICS_SILENCE_THRESHOLD_SECONDS,
     METRICS_SQLITE_ENABLED,
@@ -15,6 +16,7 @@ from .config import (  # noqa: F401
     METRICS_WS_PING_INTERVAL_SECONDS,
     METRICS_WS_PING_TIMEOUT_SECONDS,
     OUT,
+    RAN_BACKEND,
     RECONNECT_SECONDS,
     ROTATE_MAX_BYTES,
     ROTATE_MAX_FILES,
@@ -33,6 +35,7 @@ from .enrichment import (  # noqa: F401
 )
 from .storage import EventWriter, SQLiteEventSink  # noqa: F401
 from .transport import (  # noqa: F401
+    OaiMacStatsFileAdapter,
     SourceTransportAdapter,
     WebSocketSourceAdapter,
     build_transport_adapter,
