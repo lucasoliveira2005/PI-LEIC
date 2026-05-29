@@ -150,8 +150,5 @@ metrics/oran/gnb2.sa.band78.rfsim/nrMAC_stats.log
 ### Call the API
 
 ```bash
-curl -s http://127.0.0.1:18080/health | jq
-curl -s 'http://127.0.0.1:18080/metrics?source_id=oai-gnb1' | jq
-curl -s 'http://127.0.0.1:18080/alerts?status=open' | jq
-curl -s http://127.0.0.1:18080/capabilities | jq
+curl -s 'http://127.0.0.1:18080/metrics*
 ```
