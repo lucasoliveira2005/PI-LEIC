@@ -11,6 +11,8 @@ HEALTH_JSON_PATH = "metrics/health.json"
 METRICS_JSON_PATH = "metrics/metrics.json"
 ALERTS_JSON_PATH = "metrics/alerts.json"
 
+ORAN_METRICS_JSON_PATH = "metrics/oran_metrics.json"
+
 OLLAMA_URL = "http://localhost:11434/api/generate"
 
 # Nome do teu modelo no Ollama
@@ -44,7 +46,7 @@ def load_api_json(url: str) -> dict:
         raise ValueError("Resposta não contém JSON válido.") from exc
     
 # ============================================================
-# PARSE ALL DATA
+# PARSE SRSRAN DATA
 # ============================================================
 
 def parse_health(data: dict) -> str:
@@ -247,12 +249,118 @@ def parse_alarms(data: dict) -> str:
 
     return "\n".join(lines)
 
+# ============================================================
+# PARSE ORAN DATA
+# ============================================================
+
+def parse_oran_metrics(data: dict) -> str:
+
+    lines = []
+
+    # --------------------------------------------------------
+    # METRICS SUMMARY OVERVIEW
+    # --------------------------------------------------------
+    version = data.get("schema_version", "unknown")
+    timestamp = data.get("timestamp", "unknown")
     
+    lines.append(f"Metrics schema: {version}")
+    lines.append(f"Observation timestamp: {timestamp}")
+    lines.append("")
+
+    # --------------------------------------------------------
+    # CELL & CONTROL CHANNEL PERFORMANCE
+    # --------------------------------------------------------
+    cells = data.get("cells", [])
+    lines.append("Cell Infrastructure & Control Plane Load:")
+    
+    for cell in cells:
+        cell_id = cell.get("cell_id", "unknown")
+        pci = cell.get("pci")
+        pci_str = f"PCI {pci}" if pci is not None else "PCI Not Allocated/Null"
+        
+        c_channel = cell.get("control_channel_load", {})
+        cce_dl = c_channel.get("cce_fail_dl", 0)
+        cce_ul = c_channel.get("cce_fail_ul", 0)
+        
+        lines.append(f"- {cell_id} ({pci_str}):")
+        lines.append(f"  * Control Channel Failures: PDCCH (DL CCE) {cce_dl} / PUCCH (UL CCE) {cce_ul}")
+    lines.append("")
+
+    # --------------------------------------------------------
+    # NETWORK AGGREGATE THROUGHPUT
+    # --------------------------------------------------------
+    ues = data.get("ues", [])
+    total_dl_throughput = sum(ue.get("throughput", {}).get("dl_goodput_mbps", 0.0) for ue in ues)
+    total_ul_throughput = sum(ue.get("throughput", {}).get("ul_goodput_mbps", 0.0) for ue in ues)
+
+    lines.append("Network Aggregate Throughput:")
+    lines.append(f"- Total Network DL Throughput: {total_dl_throughput:.2f} Mbps")
+    lines.append(f"- Total Network UL Throughput: {total_ul_throughput:.2f} Mbps")
+    lines.append("")
+
+    # --------------------------------------------------------
+    # PER USER EQUIPMENT (UE) DETAILED METRICS
+    # --------------------------------------------------------
+    lines.append("User Equipment Detailed Metrics:")
+    
+    for ue in ues:
+        ue_id = ue.get("ue_id", "unknown")
+        cell_id = ue.get("cell_id", "unknown")
+        sync = ue.get("sync_state", "unknown")
+        
+        # Radio Quality
+        rq = ue.get("radio_quality", {})
+        cqi = rq.get("cqi")
+        cqi_str = str(cqi) if cqi is not None else "Null"
+        ri = rq.get("rank_indicator")
+        ri_str = f"MIMO Rank {ri}" if ri is not None else "Rank Null"
+        rsrp = rq.get("rsrp_dbm", 0.0)
+        dl_snr = rq.get("dl_snr_db", 0.0)
+        ul_snr = rq.get("ul_snr_db", 0.0)
+        phr = rq.get("power_headroom_db", 0.0)
+        
+        # Throughput
+        tp = ue.get("throughput", {})
+        dl_tp = tp.get("dl_goodput_mbps", 0.0)
+        ul_tp = tp.get("ul_goodput_mbps", 0.0)
+        
+        # Reliability & HARQ
+        rel = ue.get("reliability", {})
+        dl_bler = rel.get("dl_bler", 0.0)
+        ul_bler = rel.get("ul_bler", 0.0)
+        dl_rounds = rel.get("dlsch_rounds", [0, 0, 0, 0])
+        ul_rounds = rel.get("ulsch_rounds", [0, 0, 0, 0])
+        pucch_dtx = rel.get("pucch_dtx", 0)
+        ulsch_dtx = rel.get("ulsch_dtx", 0)
+        
+        # Scheduler
+        sched = ue.get("scheduler", {})
+        dl_mcs = sched.get("dl_mcs", 0)
+        ul_mcs = sched.get("ul_mcs", 0)
+
+        lines.append(f"- {ue_id} attached to {cell_id} [Sync: {sync}]:")
+        lines.append(f"  * Throughput (Goodput): DL {dl_tp} Mbps / UL {ul_tp} Mbps")
+        lines.append("  * RF & Link Quality:")
+        lines.append(f"    + SS-RSRP: {rsrp} dBm")
+        lines.append(f"    + SNR: DL {dl_snr} dB / UL {ul_snr} dB")
+        lines.append(f"    + CQI: {cqi_str} | Spatial Multiplexing: {ri_str}")
+        lines.append(f"    + Power Headroom (PHR): {phr} dB")
+        lines.append("  * Efficiency & HARQ Rounds:")
+        lines.append(f"    + Block Error Rate (BLER): DL {dl_bler:.2%} / UL {ul_bler:.2%}")
+        lines.append(f"    + DLSCH HARQ (Rounds 1-4): {dl_rounds}")
+        lines.append(f"    + ULSCH HARQ (Rounds 1-4): {ul_rounds}")
+        lines.append(f"    + Discontinuous Transmission (DTX): PUCCH {pucch_dtx} / ULSCH {ulsch_dtx}")
+        lines.append("  * Scheduler Allocations:")
+        lines.append(f"    + Modulation Coding Scheme (MCS): DL {dl_mcs} / UL {ul_mcs}")
+        lines.append("")
+
+    return "\n".join(lines)
+
 # ============================================================
 # BUILD NETWORK SUMMARY
 # ============================================================
 
-def build_network_summary() -> str:
+def build_srsRAN_network_summary() -> str:
 
     # --------------------------------------------------------
     # LOAD LOCAL METRICS FOR TESTING
@@ -268,7 +376,7 @@ def build_network_summary() -> str:
 
     # health = load_api_json("http://localhost:8000/health")
     # metrics = load_api_json("http://localhost:8000/metrics")
-    #alerts = load_api_json("http://localhost:8000/alerts")
+    # alerts = load_api_json("http://localhost:8000/alerts")
 
     # --------------------------------------------------------
     # PARSE DATA INTO SUMMARY
@@ -282,9 +390,47 @@ def build_network_summary() -> str:
 
     return final_summary
 
+def build_ORAN_network_summary() -> str:
+
+    # --------------------------------------------------------
+    # LOAD LOCAL METRICS FOR TESTING
+    # --------------------------------------------------------
+
+    metrics = load_local_json(ORAN_METRICS_JSON_PATH)
+
+    # --------------------------------------------------------
+    # LOAD METRICS FROM API 
+    # --------------------------------------------------------
+
+      #TODO: definir URLs corretas para o ORAN
+
+    # --------------------------------------------------------
+    # PARSE DATA INTO SUMMARY
+    # --------------------------------------------------------
+
+    metrics_summary = parse_oran_metrics(metrics)
+
+    final_summary = f"{metrics_summary}\n"
+
+    return final_summary
+
 # ============================================================
 # OLLAMA CALL
 # ============================================================
+
+
+def build_network_summary(software: str) -> str:
+
+    match software:
+        case "oran":
+            return build_ORAN_network_summary()
+
+        case "srsran":
+            return build_srsRAN_network_summary()
+
+        case _:
+            raise ValueError(f"Unsupported software type: {software}")
+
 
 
 #transformar isto numa função que recebe apenas a pergunta.
@@ -327,7 +473,11 @@ def main():
         # BUILD SUMMARY
         # ----------------------------------------------------
 
-        summary = build_network_summary()
+
+        software= input("Enter software type: ")
+        
+        summary = build_network_summary(software)
+        
 
         print("\n================ NETWORK SUMMARY ================\n")
         print(summary)
@@ -351,20 +501,28 @@ def main():
 
             if question.lower() in ["refresh"]:
                 print("\nRefreshing network summary...\n")
-                summary = build_network_summary()
+                summary = build_network_summary(software)
                 print(summary)
                 continue
 
             if question.lower() in ["exit"]:
                 break
 
-            start_time = time.perf_counter()  
+            start_time = time.perf_counter()
             answer = ask_llm(summary, question)
             elapsed_seconds = time.perf_counter() - start_time
 
+            # Format elapsed time as minutes and seconds
+            minutes = int(elapsed_seconds // 60)
+            seconds = elapsed_seconds % 60
+            if minutes:
+                time_str = f"{minutes}m {seconds:.3f}s"
+            else:
+                time_str = f"{seconds:.3f}s"
+
             print("\nLLM Response:\n")
             print(answer)
-            print(f"\nLLM response time: {elapsed_seconds:.3f} seconds")
+            print(f"\nLLM response time: {time_str} ({elapsed_seconds:.3f} seconds)")
 
 
     except Exception as e:

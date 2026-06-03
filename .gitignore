@@ -20,3 +20,6 @@ src/srsRAN_Project/
 .idea/
 *.swp
 test_subshell.sh
+
+agent/afazer
+
