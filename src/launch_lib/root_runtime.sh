@@ -64,7 +64,6 @@ root_runtime_start_root_unit() {
 
   sudo -n systemd-run \
     --quiet \
-    --collect \
     --no-ask-password \
     --unit="$unit" \
     --description="$description" \
@@ -87,7 +86,6 @@ root_runtime_start_user_unit() {
   systemd-run \
     --user \
     --quiet \
-    --collect \
     --unit="$unit" \
     --description="$description" \
     --working-directory="$WORKDIR" \

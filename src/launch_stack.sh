@@ -3,6 +3,55 @@ set -euo pipefail
 
 SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 WORKDIR="${WORKDIR:-$SCRIPT_DIR}"
+REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
+
+source_runtime_env_if_present() {
+  local env_file="${RUNTIME_ENV_FILE:-$REPO_ROOT/var/oai.env}"
+  local name
+  local -A saved_values=()
+  local -a saved_names=()
+  local -a override_names=(
+    RAN_BACKEND
+    PYTHON_BIN
+    VENV_DIR
+    METRICS_SOURCES_CONFIG
+    METRICS_OUT
+    METRICS_AGENT_OUT
+    METRICS_SQLITE_PATH
+    API_HOST
+    API_PORT
+    DASHBOARD_ENABLED
+    GNB_BIN
+    UE_BIN
+    GNB_CONFIGS
+    UE_CONFIGS
+    OAI_GNB_EXTRA_ARGS
+    OAI_UE_EXTRA_ARGS
+    UE_NAMESPACES
+    RUNTIME_ENV_FILE
+  )
+
+  if [[ "${PI_LEIC_AUTO_SOURCE_ENV:-1}" != "1" || ! -f "$env_file" ]]; then
+    return
+  fi
+
+  for name in "${override_names[@]}"; do
+    if [[ -v "$name" ]]; then
+      saved_values[$name]="${!name}"
+      saved_names+=("$name")
+    fi
+  done
+
+  # shellcheck source=/dev/null
+  source "$env_file"
+
+  for name in "${saved_names[@]}"; do
+    printf -v "$name" '%s' "${saved_values[$name]}"
+    export "$name"
+  done
+}
+
+source_runtime_env_if_present
 
 ACTION="start"
 MODE="${MODE:-supervised}"
@@ -1185,6 +1234,7 @@ case "$ACTION" in
     ;;
   stop)
     stop_supervised_stack
+    cleanup_stale_lab_processes
     ;;
   status)
     show_supervised_status
