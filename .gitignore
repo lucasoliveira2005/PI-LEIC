@@ -22,4 +22,5 @@ src/srsRAN_Project/
 test_subshell.sh
 
 agent/afazer
+agent/venv
 
