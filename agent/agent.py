@@ -1,7 +1,9 @@
 import json
 import os
+import re
 import time
 import requests
+from datetime import datetime
 from pathlib import Path
 
 # ============================================================
@@ -297,11 +299,16 @@ def parse_oran_metrics(data: dict) -> str:
     # --------------------------------------------------------
     # METRICS SUMMARY OVERVIEW
     # --------------------------------------------------------
-    version = data.get("schema_version", "unknown")
-    timestamp = data.get("timestamp", "unknown")
+
+    raw_timestamp = data.get("timestamp")
+
+    try:
+        dt = datetime.fromisoformat(raw_timestamp.replace("Z", "+00:00"))
+        timestamp = dt.strftime("%d/%m/%Y %H:%M")
+    except Exception:
+        timestamp = "unknown"
     
-    lines.append(f"Metrics schema: {version}")
-    lines.append(f"Observation timestamp: {timestamp}")
+    lines.append(f"Observed at: {timestamp}")
     lines.append("")
 
     # --------------------------------------------------------
@@ -402,7 +409,6 @@ def parse_oran_metrics(data: dict) -> str:
             lines.append(f"  * DTX ULSCH: {ulsch_dtx}")
             lines.append(f"  * MCS DL: {dl_mcs}")
             lines.append(f"  * MCS UL: {ul_mcs}")
-            lines.append("")
 
     return "\n".join(lines)
 
