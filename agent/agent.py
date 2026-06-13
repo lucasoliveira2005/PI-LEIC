@@ -1,4 +1,5 @@
 import json
+import os
 import time
 import requests
 from pathlib import Path
@@ -534,4 +535,22 @@ def main():
 # ============================================================
 
 if __name__ == "__main__":
+    import threading
+    import webbrowser
+
+    port = int(os.environ.get("AGENT_UI_PORT", 5000))
+    url = f"http://localhost:{port}"
+
+    # start Flask server in background thread
+    from server import app
+    server_thread = threading.Thread(
+        target=lambda: app.run(host="0.0.0.0", port=port, debug=False, use_reloader=False),
+        daemon=True
+    )
+    server_thread.start()
+
+    # give the server a moment then open browser
+    threading.Timer(1.0, lambda: webbrowser.open(url)).start()
+    print(f"RANPilot UI → {url}")
+
     main()
