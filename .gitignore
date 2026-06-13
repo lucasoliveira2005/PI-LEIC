@@ -23,4 +23,5 @@ test_subshell.sh
 
 agent/afazer
 agent/venv
+.venv
 
