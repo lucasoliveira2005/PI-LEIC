@@ -256,6 +256,42 @@ def parse_alarms(data: dict) -> str:
 
 def parse_oran_metrics(data: dict) -> str:
 
+    def normalize_cell_id(cell_id: object) -> tuple[str, str]:
+
+        cell_id_text = str(cell_id or "unknown")
+        lower_cell_id = cell_id_text.lower()
+
+        gnb_match = re.search(r"(?:^|[-_])gnb(\d+)", lower_cell_id)
+        cell_match = re.search(r"cell[-_]?(\d+)", lower_cell_id)
+
+        gnb_label = f"GNB{gnb_match.group(1)}" if gnb_match else cell_id_text.upper()
+        cell_label = f"{gnb_label}-CELL{cell_match.group(1)}" if cell_match else f"{gnb_label}-CELL"
+
+        return gnb_label, cell_label
+
+    def format_rnti(ue_id: object) -> str:
+
+        ue_id_text = str(ue_id or "unknown")
+
+        if ":" in ue_id_text:
+            return ue_id_text.split(":", 1)[1].upper()
+
+        return ue_id_text.upper()
+
+    def format_null_or_number(value: object) -> str:
+
+        if value is None:
+            return "Null"
+
+        return str(value)
+
+    def format_float(value: object) -> str:
+
+        if value is None:
+            return "0.0"
+
+        return str(float(value))
+
     lines = []
 
     # --------------------------------------------------------
@@ -272,88 +308,101 @@ def parse_oran_metrics(data: dict) -> str:
     # CELL & CONTROL CHANNEL PERFORMANCE
     # --------------------------------------------------------
     cells = data.get("cells", [])
-    lines.append("Cell Infrastructure & Control Plane Load:")
+    cells_by_gnb = {}
+    gnb_order = []
+
+    lines.append("Cell Infrastructure")
     
     for cell in cells:
         cell_id = cell.get("cell_id", "unknown")
-        pci = cell.get("pci")
-        pci_str = f"PCI {pci}" if pci is not None else "PCI Not Allocated/Null"
+        gnb_label, cell_label = normalize_cell_id(cell_id)
+
+        if gnb_label not in cells_by_gnb:
+            cells_by_gnb[gnb_label] = []
+            gnb_order.append(gnb_label)
+
+        cells_by_gnb[gnb_label].append(cell)
         
         c_channel = cell.get("control_channel_load", {})
         cce_dl = c_channel.get("cce_fail_dl", 0)
         cce_ul = c_channel.get("cce_fail_ul", 0)
         
-        lines.append(f"- {cell_id} ({pci_str}):")
-        lines.append(f"  * Control Channel Failures: PDCCH (DL CCE) {cce_dl} / PUCCH (UL CCE) {cce_ul}")
-    lines.append("")
+        lines.append(f" - {cell_label}")
+        lines.append(f"   * DL CCE: {cce_dl}")
+        lines.append(f"   * UL CCE: {cce_ul}")
+        lines.append("")
 
-    # --------------------------------------------------------
-    # NETWORK AGGREGATE THROUGHPUT
-    # --------------------------------------------------------
-    ues = data.get("ues", [])
-    total_dl_throughput = sum(ue.get("throughput", {}).get("dl_goodput_mbps", 0.0) for ue in ues)
-    total_ul_throughput = sum(ue.get("throughput", {}).get("ul_goodput_mbps", 0.0) for ue in ues)
-
-    lines.append("Network Aggregate Throughput:")
-    lines.append(f"- Total Network DL Throughput: {total_dl_throughput:.2f} Mbps")
-    lines.append(f"- Total Network UL Throughput: {total_ul_throughput:.2f} Mbps")
     lines.append("")
 
     # --------------------------------------------------------
     # PER USER EQUIPMENT (UE) DETAILED METRICS
     # --------------------------------------------------------
-    lines.append("User Equipment Detailed Metrics:")
-    
-    for ue in ues:
-        ue_id = ue.get("ue_id", "unknown")
-        cell_id = ue.get("cell_id", "unknown")
-        sync = ue.get("sync_state", "unknown")
-        
-        # Radio Quality
-        rq = ue.get("radio_quality", {})
-        cqi = rq.get("cqi")
-        cqi_str = str(cqi) if cqi is not None else "Null"
-        ri = rq.get("rank_indicator")
-        ri_str = f"MIMO Rank {ri}" if ri is not None else "Rank Null"
-        rsrp = rq.get("rsrp_dbm", 0.0)
-        dl_snr = rq.get("dl_snr_db", 0.0)
-        ul_snr = rq.get("ul_snr_db", 0.0)
-        phr = rq.get("power_headroom_db", 0.0)
-        
-        # Throughput
-        tp = ue.get("throughput", {})
-        dl_tp = tp.get("dl_goodput_mbps", 0.0)
-        ul_tp = tp.get("ul_goodput_mbps", 0.0)
-        
-        # Reliability & HARQ
-        rel = ue.get("reliability", {})
-        dl_bler = rel.get("dl_bler", 0.0)
-        ul_bler = rel.get("ul_bler", 0.0)
-        dl_rounds = rel.get("dlsch_rounds", [0, 0, 0, 0])
-        ul_rounds = rel.get("ulsch_rounds", [0, 0, 0, 0])
-        pucch_dtx = rel.get("pucch_dtx", 0)
-        ulsch_dtx = rel.get("ulsch_dtx", 0)
-        
-        # Scheduler
-        sched = ue.get("scheduler", {})
-        dl_mcs = sched.get("dl_mcs", 0)
-        ul_mcs = sched.get("ul_mcs", 0)
+    ues = data.get("ues", [])
 
-        lines.append(f"- {ue_id} attached to {cell_id} [Sync: {sync}]:")
-        lines.append(f"  * Throughput (Goodput): DL {dl_tp} Mbps / UL {ul_tp} Mbps")
-        lines.append("  * RF & Link Quality:")
-        lines.append(f"    + SS-RSRP: {rsrp} dBm")
-        lines.append(f"    + SNR: DL {dl_snr} dB / UL {ul_snr} dB")
-        lines.append(f"    + CQI: {cqi_str} | Spatial Multiplexing: {ri_str}")
-        lines.append(f"    + Power Headroom (PHR): {phr} dB")
-        lines.append("  * Efficiency & HARQ Rounds:")
-        lines.append(f"    + Block Error Rate (BLER): DL {dl_bler:.2%} / UL {ul_bler:.2%}")
-        lines.append(f"    + DLSCH HARQ (Rounds 1-4): {dl_rounds}")
-        lines.append(f"    + ULSCH HARQ (Rounds 1-4): {ul_rounds}")
-        lines.append(f"    + Discontinuous Transmission (DTX): PUCCH {pucch_dtx} / ULSCH {ulsch_dtx}")
-        lines.append("  * Scheduler Allocations:")
-        lines.append(f"    + Modulation Coding Scheme (MCS): DL {dl_mcs} / UL {ul_mcs}")
-        lines.append("")
+    ues_by_gnb = {}
+    for ue in ues:
+        ue_cell_id = ue.get("cell_id", "unknown")
+        gnb_label, _cell_label = normalize_cell_id(ue_cell_id)
+
+        if gnb_label not in ues_by_gnb:
+            ues_by_gnb[gnb_label] = []
+            if gnb_label not in gnb_order:
+                gnb_order.append(gnb_label)
+
+        ues_by_gnb[gnb_label].append(ue)
+
+    for gnb_label in gnb_order:
+        grouped_ues = ues_by_gnb.get(gnb_label, [])
+
+        if not grouped_ues:
+            continue
+
+        lines.append(gnb_label)
+
+        for index, ue in enumerate(grouped_ues, start=1):
+            ue_label = f"UE{index}"
+            ue_id = ue.get("ue_id", "unknown")
+
+            radio_quality = ue.get("radio_quality", {})
+            throughput = ue.get("throughput", {})
+            reliability = ue.get("reliability", {})
+            scheduler = ue.get("scheduler", {})
+
+            rnti = format_rnti(ue_id)
+            dl_tp = format_float(throughput.get("dl_goodput_mbps", 0.0))
+            ul_tp = format_float(throughput.get("ul_goodput_mbps", 0.0))
+            rsrp = format_float(radio_quality.get("rsrp_dbm", 0.0))
+            dl_snr = format_float(radio_quality.get("dl_snr_db", 0.0))
+            ul_snr = format_float(radio_quality.get("ul_snr_db", 0.0))
+            cqi = format_null_or_number(radio_quality.get("cqi"))
+            phr = format_float(radio_quality.get("power_headroom_db", 0.0))
+            dl_bler = reliability.get("dl_bler", 0.0)
+            ul_bler = reliability.get("ul_bler", 0.0)
+            dl_rounds = reliability.get("dlsch_rounds", [0, 0, 0, 0])
+            ul_rounds = reliability.get("ulsch_rounds", [0, 0, 0, 0])
+            pucch_dtx = reliability.get("pucch_dtx", 0)
+            ulsch_dtx = reliability.get("ulsch_dtx", 0)
+            dl_mcs = scheduler.get("dl_mcs", 0)
+            ul_mcs = scheduler.get("ul_mcs", 0)
+
+            lines.append(f"- {ue_label}")
+            lines.append(f"  * RNTI: {rnti}")
+            lines.append(f"  * Throughput DL: {dl_tp} Mbps ")
+            lines.append(f"  * Throughput UL: {ul_tp} Mbps")
+            lines.append(f"  * SS-RSRP: {rsrp} dBm")
+            lines.append(f"  * SNR DL: {dl_snr} dB ")
+            lines.append(f"  * SNR UL: {ul_snr} dB")
+            lines.append(f"  * CQI: {cqi} ")
+            lines.append(f"  * PHR: {phr} dB")
+            lines.append(f"  * BLER DL: {dl_bler:.2%} ")
+            lines.append(f"  * BLER UL: {ul_bler:.2%}")
+            lines.append(f"  * DLSCH HARQ: {dl_rounds}")
+            lines.append(f"  * ULSCH HARQ: {ul_rounds}")
+            lines.append(f"  * DTX PUCCH: {pucch_dtx} ")
+            lines.append(f"  * DTX ULSCH: {ulsch_dtx}")
+            lines.append(f"  * MCS DL: {dl_mcs}")
+            lines.append(f"  * MCS UL: {ul_mcs}")
+            lines.append("")
 
     return "\n".join(lines)
 
@@ -403,7 +452,7 @@ def build_ORAN_network_summary() -> str:
     # LOAD METRICS FROM API 
     # --------------------------------------------------------
 
-      #TODO: definir URLs corretas para o ORAN
+      #TODO: definir URLs corretas para o ORAN -
 
     # --------------------------------------------------------
     # PARSE DATA INTO SUMMARY
