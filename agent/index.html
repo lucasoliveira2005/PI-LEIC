@@ -235,7 +235,11 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
     document.querySelectorAll('.page').forEach(p => p.classList.remove('active'));
     btn.classList.add('active');
     document.getElementById(target + '-page').classList.add('active');
-    if (target === 'dashboard') loadDashboard();
+    if (target === 'dashboard') {
+      startDashboardPolling();
+    } else {
+      stopDashboardPolling();
+    }
   });
 });
 
@@ -327,6 +331,16 @@ loadConfig();
    DASHBOARD
 ═══════════════════════════════════════ */
 const charts = {};
+let dashboardTimer = null;
+let dashboardActive = false;
+const chartHistory = {
+  labels: [],
+  dl: {},
+  ul: {},
+  sinr: {},
+  bler: {},
+};
+const MAX_POINTS = 60;
 
 function mkChart(id, type, labels, datasets, opts = {}) {
   const ctx = document.getElementById(id).getContext('2d');
@@ -348,18 +362,35 @@ function mkChart(id, type, labels, datasets, opts = {}) {
 }
 
 const COLORS = ['#10a37f','#5b5fc7','#f59e0b','#ef4444','#3b82f6','#a855f7'];
+const POLL_MS = 2000;
+
+function startDashboardPolling() {
+  dashboardActive = true;
+  loadDashboard();
+  if (!dashboardTimer) dashboardTimer = setInterval(loadDashboard, POLL_MS);
+}
+
+function stopDashboardPolling() {
+  dashboardActive = false;
+  if (dashboardTimer) {
+    clearInterval(dashboardTimer);
+    dashboardTimer = null;
+  }
+}
 
 async function loadDashboard() {
+  if (!dashboardActive && !document.getElementById('dashboard-page').classList.contains('active')) return;
   try {
     const [health, metrics, alerts] = await Promise.all([
-      fetch('/api/health').then(r => r.json()),
-      fetch('/api/metrics').then(r => r.json()),
-      fetch('/api/alerts').then(r => r.json()),
+      fetch('/api/health', { cache: 'no-store' }).then(r => r.json()),
+      fetch('/api/metrics', { cache: 'no-store' }).then(r => r.json()),
+      fetch('/api/alerts', { cache: 'no-store' }).then(r => r.json()),
     ]);
 
     renderStatus(health);
-    renderStats(health, metrics);
-    renderCharts(metrics);
+    const snapshot = normalizeMetrics(metrics);
+    renderStats(health, snapshot);
+    renderCharts(snapshot);
     renderAlerts(alerts);
   } catch (e) {
     document.getElementById('status-text').textContent = 'Erro ao carregar dados.';
@@ -370,28 +401,71 @@ async function loadDashboard() {
 function renderStatus(health) {
   const ok = (health.status || '').toLowerCase() === 'ok';
   document.getElementById('status-dot').className = 'status-dot ' + (ok ? 'ok' : 'error');
-  document.getElementById('status-text').textContent = ok ? 'Rede saudável' : ('Estado: ' + (health.status || 'desconhecido'));
+  const ts = health.timestamp || (health.snapshot || {}).timestamp;
+  const suffix = ts ? ' · ' + new Date(ts).toLocaleTimeString() : '';
+  document.getElementById('status-text').textContent = (ok ? 'Rede saudável' : ('Estado: ' + (health.status || 'desconhecido'))) + suffix;
 }
 
-function renderStats(health, metrics) {
-  const snap = health.snapshot || {};
-  const items = metrics.items || [];
+function normalizeMetrics(metrics) {
+  if ((metrics.cells || metrics.ues) && Array.isArray(metrics.ues)) {
+    return {
+      timestamp: metrics.timestamp,
+      cells: metrics.cells || [],
+      ues: metrics.ues || [],
+    };
+  }
 
-  let totalUEs = 0, totalDL = 0, totalUL = 0;
-  items.forEach(item => {
+  const cellsById = {};
+  const ues = [];
+  (metrics.items || []).forEach(item => {
+    const src = item.source_id || 'gnb';
     (item.entities || []).forEach(e => {
-      totalUEs++;
-      totalDL += (e.ue || {}).dl_brate || 0;
-      totalUL += (e.ue || {}).ul_brate || 0;
+      const ue = e.ue || {};
+      const cellId = `${src}-cell-${e.cell_index ?? 0}`;
+      if (!cellsById[cellId]) cellsById[cellId] = { cell_id: cellId, pci: e.pci ?? null };
+      const ok = ue.dl_nof_ok || 0;
+      const nok = ue.dl_nof_nok || 0;
+      ues.push({
+        ue_id: e.ue_identity || ue.rnti || 'UE',
+        cell_id: cellId,
+        radio_quality: {
+          sinr_db: ue.sinr_db ?? ue.pucch_snr_db ?? ue.pusch_snr_db ?? null,
+          dl_snr_db: ue.dl_snr_db ?? ue.pucch_snr_db ?? null,
+          ul_snr_db: ue.ul_snr_db ?? ue.pusch_snr_db ?? null,
+        },
+        throughput: {
+          dl_goodput_mbps: Number(ue.dl_goodput_mbps ?? ue.dl_brate ?? 0),
+          ul_goodput_mbps: Number(ue.ul_goodput_mbps ?? ue.ul_brate ?? 0),
+        },
+        reliability: {
+          dl_bler: ok + nok > 0 ? nok / (ok + nok) : Number(ue.dl_bler ?? 0),
+        },
+      });
     });
   });
 
+  return {
+    timestamp: metrics.timestamp,
+    cells: Object.values(cellsById),
+    ues,
+  };
+}
+
+function renderStats(health, snapshot) {
+  const snap = health.snapshot || {};
+
+  let totalDL = 0, totalUL = 0;
+  snapshot.ues.forEach(ue => {
+    totalDL += Number((ue.throughput || {}).dl_goodput_mbps || 0);
+    totalUL += Number((ue.throughput || {}).ul_goodput_mbps || 0);
+  });
+
   const cards = [
-    { label: 'gNBs', value: snap.sources ?? items.length, unit: '' },
-    { label: 'UEs', value: totalUEs, unit: '' },
+    { label: 'Células', value: snapshot.cells.length || snap.sources || 0, unit: '' },
+    { label: 'UEs', value: snapshot.ues.length, unit: '' },
     { label: 'DL Total', value: totalDL.toFixed(1), unit: 'Mbps' },
     { label: 'UL Total', value: totalUL.toFixed(1), unit: 'Mbps' },
-    { label: 'Entidades', value: snap.entities ?? totalUEs, unit: '' },
+    { label: 'Actualizado', value: snapshot.timestamp ? new Date(snapshot.timestamp).toLocaleTimeString() : '—', unit: '' },
   ];
 
   document.getElementById('stat-cards').innerHTML = cards.map(c => `
@@ -402,50 +476,79 @@ function renderStats(health, metrics) {
     </div>`).join('');
 }
 
-function renderCharts(metrics) {
-  const items = metrics.items || [];
+function pushPoint(store, key, value) {
+  if (!store[key]) store[key] = [];
+  store[key].push(value);
+  while (store[key].length > MAX_POINTS) store[key].shift();
+}
 
-  const cellDL = {}, cellUL = {};
-  const ueLabels = [], sinrVals = [], blerVals = [];
+function trimStore(store, labelsLength) {
+  Object.values(store).forEach(values => {
+    while (values.length > labelsLength) values.shift();
+    while (values.length < labelsLength) values.unshift(null);
+  });
+}
 
-  items.forEach(item => {
-    const src = item.source_id || 'gnb';
-    (item.entities || []).forEach(e => {
-      const ue = e.ue || {};
-      const cell = `${src} C${e.cell_index ?? 0}`;
-      cellDL[cell] = (cellDL[cell] || 0) + (ue.dl_brate || 0);
-      cellUL[cell] = (cellUL[cell] || 0) + (ue.ul_brate || 0);
+function makeDatasets(store) {
+  return Object.keys(store).sort().map((key, i) => ({
+    label: key,
+    data: store[key],
+    borderColor: COLORS[i % COLORS.length],
+    backgroundColor: COLORS[i % COLORS.length] + '33',
+    borderWidth: 2,
+    pointRadius: 1,
+    tension: 0.25,
+  }));
+}
 
-      const label = (e.ue_identity || ue.rnti || 'UE') + ' @' + src;
-      ueLabels.push(label);
-      sinrVals.push(+(ue.pucch_snr_db || 0).toFixed(1));
-      const ok = ue.dl_nof_ok || 0, nok = ue.dl_nof_nok || 0;
-      blerVals.push(ok + nok > 0 ? +((nok / (ok + nok)) * 100).toFixed(2) : 0);
+function upsertLineChart(id, datasets) {
+  if (!charts[id]) {
+    mkChart(id, 'line', chartHistory.labels, datasets, {
+      animation: false,
+      elements: { line: { fill: false } },
     });
+    return;
+  }
+  charts[id].data.labels = chartHistory.labels;
+  charts[id].data.datasets = datasets;
+  charts[id].update('none');
+}
+
+function renderCharts(snapshot) {
+  const cellDL = {}, cellUL = {};
+  const sinr = {}, bler = {};
+
+  snapshot.ues.forEach(ue => {
+    const cell = ue.cell_id || 'cell-0';
+    const tp = ue.throughput || {};
+    const rq = ue.radio_quality || {};
+    const rel = ue.reliability || {};
+    const label = `${ue.ue_id || 'UE'} @ ${cell}`;
+
+    cellDL[cell] = (cellDL[cell] || 0) + Number(tp.dl_goodput_mbps || 0);
+    cellUL[cell] = (cellUL[cell] || 0) + Number(tp.ul_goodput_mbps || 0);
+    sinr[label] = Number(rq.sinr_db ?? rq.dl_snr_db ?? rq.ul_snr_db ?? 0);
+    bler[label] = Number(rel.dl_bler ?? 0) * 100;
   });
 
-  const cellLabels = Object.keys(cellDL);
+  const ts = snapshot.timestamp ? new Date(snapshot.timestamp) : new Date();
+  chartHistory.labels.push(ts.toLocaleTimeString());
+  while (chartHistory.labels.length > MAX_POINTS) chartHistory.labels.shift();
 
-  mkChart('chart-dl', 'bar', cellLabels, [{
-    label: 'DL Mbps', data: cellLabels.map(k => +cellDL[k].toFixed(2)),
-    backgroundColor: COLORS[0] + 'cc', borderColor: COLORS[0], borderWidth: 1
-  }]);
+  Object.entries(cellDL).forEach(([key, value]) => pushPoint(chartHistory.dl, key, +value.toFixed(2)));
+  Object.entries(cellUL).forEach(([key, value]) => pushPoint(chartHistory.ul, key, +value.toFixed(2)));
+  Object.entries(sinr).forEach(([key, value]) => pushPoint(chartHistory.sinr, key, +value.toFixed(1)));
+  Object.entries(bler).forEach(([key, value]) => pushPoint(chartHistory.bler, key, +value.toFixed(2)));
 
-  mkChart('chart-ul', 'bar', cellLabels, [{
-    label: 'UL Mbps', data: cellLabels.map(k => +cellUL[k].toFixed(2)),
-    backgroundColor: COLORS[1] + 'cc', borderColor: COLORS[1], borderWidth: 1
-  }]);
+  trimStore(chartHistory.dl, chartHistory.labels.length);
+  trimStore(chartHistory.ul, chartHistory.labels.length);
+  trimStore(chartHistory.sinr, chartHistory.labels.length);
+  trimStore(chartHistory.bler, chartHistory.labels.length);
 
-  mkChart('chart-sinr', 'bar', ueLabels, [{
-    label: 'SINR dB', data: sinrVals,
-    backgroundColor: ueLabels.map((_, i) => COLORS[i % COLORS.length] + 'cc'),
-    borderColor: ueLabels.map((_, i) => COLORS[i % COLORS.length]), borderWidth: 1
-  }]);
-
-  mkChart('chart-bler', 'bar', ueLabels, [{
-    label: 'BLER %', data: blerVals,
-    backgroundColor: COLORS[3] + 'cc', borderColor: COLORS[3], borderWidth: 1
-  }]);
+  upsertLineChart('chart-dl', makeDatasets(chartHistory.dl));
+  upsertLineChart('chart-ul', makeDatasets(chartHistory.ul));
+  upsertLineChart('chart-sinr', makeDatasets(chartHistory.sinr));
+  upsertLineChart('chart-bler', makeDatasets(chartHistory.bler));
 }
 
 function renderAlerts(alerts) {

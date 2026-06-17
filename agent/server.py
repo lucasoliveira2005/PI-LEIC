@@ -1,6 +1,8 @@
 import os
 import sys
+import json
 from pathlib import Path
+from datetime import datetime, timezone
 from flask import Flask, request, jsonify, send_from_directory
 import requests as http_requests
 
@@ -17,6 +19,11 @@ from agent import (
 AGENT_DIR = Path(__file__).parent
 REPO_ROOT = AGENT_DIR.parent
 METRICS_API_BASE = os.environ.get("METRICS_API_BASE", "http://localhost:8000")
+ORAN_AGENT_OBSERVATION_PATHS = [
+    Path(os.environ.get("METRICS_AGENT_OUT", "")),
+    REPO_ROOT / "metrics/oran/agent_network_observations.jsonl",
+    REPO_ROOT / "metrics/agent_network_observations.jsonl",
+]
 
 
 def _normalize_backend(value: str) -> str:
@@ -42,6 +49,62 @@ def _metrics_api_get(path: str):
         return None
 
 
+def _parse_epoch(value):
+    if value is None:
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if not isinstance(value, str):
+        return None
+    text = value.strip()
+    if not text:
+        return None
+    if text.endswith("Z"):
+        text = text[:-1] + "+00:00"
+    try:
+        parsed = datetime.fromisoformat(text)
+    except ValueError:
+        return None
+    if parsed.tzinfo is None:
+        parsed = parsed.replace(tzinfo=timezone.utc)
+    return parsed.timestamp()
+
+
+def _latest_jsonl(paths):
+    for path in paths:
+        if not path or not path.exists():
+            continue
+        try:
+            with path.open("rb") as handle:
+                handle.seek(0, os.SEEK_END)
+                pos = handle.tell()
+                chunk = b""
+                while pos > 0:
+                    step = min(8192, pos)
+                    pos -= step
+                    handle.seek(pos)
+                    chunk = handle.read(step) + chunk
+                    lines = [line for line in chunk.splitlines() if line.strip()]
+                    if lines:
+                        return json.loads(lines[-1].decode("utf-8"))
+        except (OSError, json.JSONDecodeError, UnicodeDecodeError):
+            continue
+    return None
+
+
+def _metrics_timestamp(payload):
+    if not isinstance(payload, dict):
+        return None
+    return _parse_epoch(payload.get("timestamp") or payload.get("collector_timestamp"))
+
+
+def _freshest_metrics_payload(*payloads):
+    candidates = [payload for payload in payloads if isinstance(payload, dict) and payload]
+    if not candidates:
+        return {}
+    return max(candidates, key=lambda payload: _metrics_timestamp(payload) or 0)
+
+
 def _load_data(name: str):
     paths = {
         "health": HEALTH_JSON_PATH,
@@ -54,11 +117,26 @@ def _load_data(name: str):
         "alerts": "/alerts",
     }
     live = _metrics_api_get(api_paths[name])
+    if name == "metrics":
+        local_observation = _latest_jsonl(ORAN_AGENT_OBSERVATION_PATHS)
+        return _freshest_metrics_payload(live, local_observation)
     if live is not None:
         return live
     try:
         return load_local_json(paths[name])
     except Exception:
+        if name == "health":
+            metrics = _latest_jsonl(ORAN_AGENT_OBSERVATION_PATHS) or {}
+            ue_count = len(metrics.get("ues") or [])
+            cell_count = len(metrics.get("cells") or [])
+            return {
+                "status": "ok" if ue_count or cell_count else "unknown",
+                "snapshot": {
+                    "sources": cell_count,
+                    "entities": ue_count,
+                    "timestamp": metrics.get("timestamp"),
+                },
+            }
         return {}
 
 
