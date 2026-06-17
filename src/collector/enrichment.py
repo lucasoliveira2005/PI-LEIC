@@ -13,6 +13,141 @@ from shared.identity import extract_cell_ue_entities  # re-exported for collecto
 
 from .config import METRICS_SCHEMA_VERSION, SOURCES_CONFIG
 
+_GOODPUT_STATE: Dict[tuple, Dict[str, Any]] = {}
+
+def _timestamp_epoch(value: Any) -> Optional[float]:
+    if value in (None, ""):
+        return None
+    if isinstance(value, (int, float)):
+        return float(value)
+    if isinstance(value, str):
+        try:
+            return float(value)
+        except ValueError:
+            pass
+        try:
+            return datetime.fromisoformat(value.replace("Z", "+00:00")).timestamp()
+        except ValueError:
+            return None
+    return None
+
+
+def _positive_float(value: Any) -> Optional[float]:
+    try:
+        result = float(value)
+    except (TypeError, ValueError):
+        return None
+    return result if result > 0 else None
+
+
+def _sum_lcid_bytes(ue_metrics: Dict[str, Any], key: str) -> Optional[float]:
+    lcid_bytes = ue_metrics.get("lcid_bytes")
+    if not isinstance(lcid_bytes, list):
+        return None
+
+    total = 0.0
+    seen = False
+    for entry in lcid_bytes:
+        if not isinstance(entry, dict):
+            continue
+        try:
+            total += float(entry.get(key) or 0)
+            seen = True
+        except (TypeError, ValueError):
+            continue
+
+    return total if seen else None
+
+
+def compute_goodput(
+    source_id: str,
+    rnti: str,
+    dl_bytes: float,
+    ul_bytes: float,
+    ts: Optional[float],
+):
+    import time
+
+    if ts is None:
+        ts = time.time()
+
+    key = (source_id, rnti)
+    prev = _GOODPUT_STATE.get(key)
+
+    if prev is None:
+        _GOODPUT_STATE[key] = {
+            "dl": dl_bytes,
+            "ul": ul_bytes,
+            "ts": ts,
+        }
+        return 0.0, 0.0
+
+    dt = ts - prev["ts"]
+    if dt <= 0:
+        dt = 1e-3
+
+    dl_rate = (dl_bytes - prev["dl"]) * 8 / dt / 1e6
+    ul_rate = (ul_bytes - prev["ul"]) * 8 / dt / 1e6
+
+    _GOODPUT_STATE[key] = {
+        "dl": dl_bytes,
+        "ul": ul_bytes,
+        "ts": ts,
+    }
+
+    return max(dl_rate, 0.0), max(ul_rate, 0.0)
+
+
+def enrich_oai_goodput(source_id: str, payload: Dict[str, Any]) -> None:
+    """Normalize OAI MAC byte counters into per-UE bitrate fields.
+
+    OAI can emit ``goodput 0.0 Mbps`` even while LCID TX/RX counters are moving.
+    The validator and API contracts use ``dl_brate``/``ul_brate`` as normalized
+    bits/s fields, so derive those from counter deltas when available.  Existing
+    positive OAI goodput remains authoritative.
+    """
+
+    stats = payload.get("oai_mac_stats")
+    if not isinstance(stats, dict):
+        return
+
+    ues = stats.get("ues")
+    if not isinstance(ues, list):
+        return
+
+    ts = _timestamp_epoch(payload.get("timestamp"))
+    for ue_metrics in ues:
+        if not isinstance(ue_metrics, dict):
+            continue
+
+        rnti = str(ue_metrics.get("rnti") or f"ue-{id(ue_metrics)}")
+        dl_goodput = _positive_float(ue_metrics.get("dl_goodput_mbps"))
+        ul_goodput = _positive_float(ue_metrics.get("ul_goodput_mbps"))
+
+        dl_bytes = _sum_lcid_bytes(ue_metrics, "tx_bytes")
+        ul_bytes = _sum_lcid_bytes(ue_metrics, "rx_bytes")
+        if dl_bytes is not None and ul_bytes is not None:
+            derived_dl, derived_ul = compute_goodput(
+                source_id=source_id,
+                rnti=rnti,
+                dl_bytes=dl_bytes,
+                ul_bytes=ul_bytes,
+                ts=ts,
+            )
+            dl_goodput = dl_goodput if dl_goodput is not None else _positive_float(derived_dl)
+            ul_goodput = ul_goodput if ul_goodput is not None else _positive_float(derived_ul)
+
+        if dl_goodput is not None:
+            ue_metrics["dl_goodput_mbps"] = dl_goodput
+            ue_metrics["dl_brate"] = dl_goodput * 1_000_000.0
+        elif ue_metrics.get("dl_brate") is None:
+            ue_metrics["dl_brate"] = 0.0
+
+        if ul_goodput is not None:
+            ue_metrics["ul_goodput_mbps"] = ul_goodput
+            ue_metrics["ul_brate"] = ul_goodput * 1_000_000.0
+        elif ue_metrics.get("ul_brate") is None:
+            ue_metrics["ul_brate"] = 0.0
 
 def required_source_keys() -> List[str]:
     return ["source_id", "gnb_id"]
@@ -169,6 +304,9 @@ def enrich_event(source: Dict, payload: Dict) -> Dict:
     family = metric_family(payload)
     endpoint_value = source_endpoint(source)
 
+    if family == "oai_mac_stats":
+        enrich_oai_goodput(source["source_id"], payload)
+
     event = {
         "collector_timestamp": datetime.now(timezone.utc).isoformat(),
         "source_id": source["source_id"],
@@ -214,13 +352,11 @@ def summarize_event(
         ues = stats.get("ues") if isinstance(stats, dict) else []
         if isinstance(ues, list) and ues:
             sample = ues[0] if isinstance(ues[0], dict) else {}
-            dl_goodput = sample.get("dl_goodput_mbps") or 0
-            ul_goodput = sample.get("ul_goodput_mbps") or 0
             return (
                 f"[{source_id}] oai_mac_stats "
                 f"ues={len(ues)} sample=rnti:{sample.get('rnti', '-')}"
-                f" dl_goodput={dl_goodput:.2f}"
-                f" ul_goodput={ul_goodput:.2f}"
+                f" dl_goodput={float(sample.get('dl_goodput_mbps', 0) or 0):.2f}"
+                f" ul_goodput={float(sample.get('ul_goodput_mbps', 0) or 0):.2f}"
             )
         return f"[{source_id}] oai_mac_stats ues=0"
 

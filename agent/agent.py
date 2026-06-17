@@ -10,16 +10,33 @@ from pathlib import Path
 # CONFIG
 # ============================================================
 
-HEALTH_JSON_PATH = "metrics/health.json"
-METRICS_JSON_PATH = "metrics/metrics.json"
-ALERTS_JSON_PATH = "metrics/alerts.json"
+REPO_ROOT = Path(__file__).resolve().parent.parent
 
-ORAN_METRICS_JSON_PATH = "metrics/oran_metrics.json"
+HEALTH_JSON_PATH = str(REPO_ROOT / "metrics/health.json")
+METRICS_JSON_PATH = str(REPO_ROOT / "metrics/metrics.json")
+ALERTS_JSON_PATH = str(REPO_ROOT / "metrics/alerts.json")
+
+ORAN_METRICS_JSON_PATH = str(REPO_ROOT / "metrics/oran_metrics.json")
+AGENT_OBSERVATION_JSONL_PATHS = [
+    os.environ.get("METRICS_AGENT_OUT", ""),
+    str(REPO_ROOT / "metrics/oran/agent_network_observations.jsonl"),
+    str(REPO_ROOT / "metrics/agent_network_observations.jsonl"),
+]
 
 OLLAMA_URL = "http://localhost:11434/api/generate"
+METRICS_API_BASE = os.environ.get("METRICS_API_BASE", "http://localhost:8000").rstrip("/")
 
 # Nome do teu modelo no Ollama
 MODEL_NAME = "RANPilot"
+
+
+def normalize_backend(value: str) -> str:
+    backend = (value or "oai").strip().lower()
+    if backend in {"oai", "oran", "openairinterface"}:
+        return "oai"
+    if backend == "srsran":
+        return "srsran"
+    raise ValueError(f"Unsupported software type: {value}")
 
 # ============================================================
 # LOAD JSON
@@ -40,13 +57,60 @@ def load_local_json(filepath: str) -> dict:
 
 def load_api_json(url: str) -> dict:
     try:
-        response = requests.get(url)
+        response = requests.get(url, timeout=3)
         response.raise_for_status()
         return response.json()
     except requests.RequestException as exc:
         raise RuntimeError(f"Erro na requisição: {exc}") from exc
     except ValueError as exc:
         raise ValueError("Resposta não contém JSON válido.") from exc
+
+
+def load_api_json_or_none(path: str) -> dict | None:
+    url = path if path.startswith(("http://", "https://")) else f"{METRICS_API_BASE}{path}"
+    try:
+        return load_api_json(url)
+    except Exception:
+        return None
+
+
+def load_local_json_or_none(filepath: str) -> dict | None:
+    try:
+        return load_local_json(filepath)
+    except Exception:
+        return None
+
+
+def load_latest_jsonl_or_none(paths: list[str]) -> dict | None:
+    for raw_path in paths:
+        if not raw_path:
+            continue
+        path = Path(raw_path)
+        if not path.exists():
+            continue
+
+        latest = None
+        with path.open("r", encoding="utf-8") as handle:
+            for line in handle:
+                line = line.strip()
+                if not line:
+                    continue
+                try:
+                    latest = json.loads(line)
+                except json.JSONDecodeError:
+                    continue
+        if latest is not None:
+            return latest
+    return None
+
+
+def empty_network_observation() -> dict:
+    return {
+        "schema_version": "network-observation.v1",
+        "timestamp": datetime.now().isoformat(),
+        "cells": [],
+        "ues": [],
+    }
     
 # ============================================================
 # PARSE SRSRAN DATA
@@ -418,28 +482,31 @@ def parse_oran_metrics(data: dict) -> str:
 
 def build_srsRAN_network_summary() -> str:
 
-    # --------------------------------------------------------
-    # LOAD LOCAL METRICS FOR TESTING
-    # --------------------------------------------------------
-
-    health = load_local_json(HEALTH_JSON_PATH)
-    metrics = load_local_json(METRICS_JSON_PATH)
-    alerts = load_local_json(ALERTS_JSON_PATH)
-
-    # --------------------------------------------------------
-    # LOAD METRICS FROM API 
-    # --------------------------------------------------------
-
-    # health = load_api_json("http://localhost:8000/health")
-    # metrics = load_api_json("http://localhost:8000/metrics")
-    # alerts = load_api_json("http://localhost:8000/alerts")
+    health = (
+        load_api_json_or_none("/health")
+        or load_local_json_or_none(HEALTH_JSON_PATH)
+        or {"status": "unknown", "snapshot": {}, "sources": {}}
+    )
+    metrics = (
+        load_api_json_or_none("/metrics")
+        or load_local_json_or_none(METRICS_JSON_PATH)
+        or empty_network_observation()
+    )
+    alerts = (
+        load_api_json_or_none("/alerts")
+        or load_local_json_or_none(ALERTS_JSON_PATH)
+        or {"count": 0, "items": []}
+    )
 
     # --------------------------------------------------------
     # PARSE DATA INTO SUMMARY
     # --------------------------------------------------------
 
     health_summary = parse_health(health)
-    metrics_summary = parse_metrics(metrics)
+    if isinstance(metrics.get("cells"), list) or isinstance(metrics.get("ues"), list):
+        metrics_summary = parse_oran_metrics(metrics)
+    else:
+        metrics_summary = parse_metrics(metrics)
     alerts_summary = parse_alarms(alerts)
 
     final_summary = f"{health_summary}\n\n{metrics_summary}\n\n{alerts_summary}"
@@ -448,25 +515,32 @@ def build_srsRAN_network_summary() -> str:
 
 def build_ORAN_network_summary() -> str:
 
-    # --------------------------------------------------------
-    # LOAD LOCAL METRICS FOR TESTING
-    # --------------------------------------------------------
-
-    metrics = load_local_json(ORAN_METRICS_JSON_PATH)
-
-    # --------------------------------------------------------
-    # LOAD METRICS FROM API 
-    # --------------------------------------------------------
-
-      #TODO: definir URLs corretas para o ORAN -
+    health = (
+        load_api_json_or_none("/health")
+        or load_local_json_or_none(HEALTH_JSON_PATH)
+        or {"status": "unknown", "snapshot": {}, "sources": {}}
+    )
+    metrics = (
+        load_api_json_or_none("/metrics")
+        or load_latest_jsonl_or_none(AGENT_OBSERVATION_JSONL_PATHS)
+        or load_local_json_or_none(ORAN_METRICS_JSON_PATH)
+        or empty_network_observation()
+    )
+    alerts = (
+        load_api_json_or_none("/alerts")
+        or load_local_json_or_none(ALERTS_JSON_PATH)
+        or {"count": 0, "items": []}
+    )
 
     # --------------------------------------------------------
     # PARSE DATA INTO SUMMARY
     # --------------------------------------------------------
 
+    health_summary = parse_health(health)
     metrics_summary = parse_oran_metrics(metrics)
+    alerts_summary = parse_alarms(alerts)
 
-    final_summary = f"{metrics_summary}\n"
+    final_summary = f"{health_summary}\n\n{metrics_summary}\n\n{alerts_summary}"
 
     return final_summary
 
@@ -476,9 +550,10 @@ def build_ORAN_network_summary() -> str:
 
 
 def build_network_summary(software: str) -> str:
+    software = normalize_backend(software)
 
     match software:
-        case "oran":
+        case "oai":
             return build_ORAN_network_summary()
 
         case "srsran":
@@ -530,7 +605,8 @@ def main():
         # ----------------------------------------------------
 
 
-        software= input("Enter software type: ")
+        software = normalize_backend(os.environ.get("RAN_BACKEND", "oai"))
+        print(f"Network software: {software}")
         
         summary = build_network_summary(software)
         

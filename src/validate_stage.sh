@@ -5,14 +5,14 @@ SCRIPT_DIR="$(cd -- "$(dirname -- "${BASH_SOURCE[0]}")" && pwd)"
 REPO_ROOT="$(cd -- "$SCRIPT_DIR/.." && pwd)"
 
 PYTHON_BIN="${PYTHON_BIN:-python3}"
-METRICS_OUT="${METRICS_OUT:-$REPO_ROOT/metrics/gnb_metrics.jsonl}"
+METRICS_OUT="${METRICS_OUT:-$REPO_ROOT/metrics/oran/gnb_metrics.jsonl}"
 METRICS_SOURCES_CONFIG="${METRICS_SOURCES_CONFIG:-$REPO_ROOT/config/metrics_sources.json}"
 METRICS_LOG_INCLUDE_ROTATED="${METRICS_LOG_INCLUDE_ROTATED:-1}"
 METRICS_LOG_MAX_ARCHIVES="${METRICS_LOG_MAX_ARCHIVES:-5}"
 METRICS_SQLITE_ENABLED="${METRICS_SQLITE_ENABLED:-1}"
 METRICS_SQLITE_PATH="${METRICS_SQLITE_PATH:-/tmp/pi-leic-metrics.sqlite}"
 FRESHNESS_CHECK_MODE="${FRESHNESS_CHECK_MODE:-hybrid}"
-FRESHNESS_AGE_WINDOW_SECONDS="${FRESHNESS_AGE_WINDOW_SECONDS:-15}"
+FRESHNESS_AGE_WINDOW_SECONDS="${FRESHNESS_AGE_WINDOW_SECONDS:-30}"
 FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS="${FRESHNESS_CLOCK_SKEW_TOLERANCE_SECONDS:-2}"
 # Persist the validator freshness baseline under var/ so a crash between
 # "baseline captured" and "validate_metrics" does not force a full rerun.
@@ -22,10 +22,10 @@ TRAFFIC_TARGET="${TRAFFIC_TARGET:-10.45.0.1}"
 IPERF_DURATION_SECONDS="${IPERF_DURATION_SECONDS:-5}"
 IPERF_PORT="${IPERF_PORT:-5201}"
 IPERF_SERVER_MANAGE="${IPERF_SERVER_MANAGE:-1}"
-TRAFFIC_SETTLE_SECONDS="${TRAFFIC_SETTLE_SECONDS:-3}"
+TRAFFIC_SETTLE_SECONDS="${TRAFFIC_SETTLE_SECONDS:-15}"
 NET_READY_TIMEOUT_SECONDS="${NET_READY_TIMEOUT_SECONDS:-60}"
 NET_READY_POLL_SECONDS="${NET_READY_POLL_SECONDS:-1}"
-UE_NAMESPACES_RAW="${UE_NAMESPACES:-ue1:ue2}"
+UE_NAMESPACES_RAW="${UE_NAMESPACES:-ue-oai1:ue-oai2}"
 LAUNCH_MODE="${LAUNCH_MODE:-supervised}"
 LAUNCH_DASHBOARD_ENABLED="${LAUNCH_DASHBOARD_ENABLED:-0}"
 LAUNCH_HEALTHCHECK_ENABLED="${LAUNCH_HEALTHCHECK_ENABLED:-1}"
@@ -467,7 +467,7 @@ start_iperf_servers() {
     (( idx++ )) || true
   done
   # Brief pause so all servers bind before the first client connects.
-  sleep 0.5
+  sleep 2
 }
 
 stop_iperf_servers() {
@@ -579,25 +579,32 @@ fi
 if [[ "$SKIP_TRAFFIC" != "1" ]]; then
   start_iperf_servers
 
-  # Wait for each UE namespace to have a routable path to TRAFFIC_TARGET before
-  # starting its iperf3 client.  Route-waits run sequentially (they are fast in
-  # practice and order doesn't matter); iperf3 clients are then all backgrounded
-  # so every UE generates traffic simultaneously, producing concurrent load across
-  # all gNBs rather than sequential single-UE bursts.
-  iperf_pids=()
-  iperf_port_idx=0
-  for netns_name in "${UE_NAMESPACES[@]}"; do
-    wait_for_netns_route "$netns_name"
-    local_port=$(( IPERF_PORT + iperf_port_idx ))
-    echo "Running iperf3 from ${netns_name} to ${TRAFFIC_TARGET} for ${IPERF_DURATION_SECONDS}s (port ${local_port})..."
-    sudo -n ip netns exec "$netns_name" iperf3 -c "$TRAFFIC_TARGET" -t "$IPERF_DURATION_SECONDS" -p "$local_port" &
-    iperf_pids+=($!)
-    (( iperf_port_idx++ )) || true
-  done
-
   traffic_failed=0
-  for pid in "${iperf_pids[@]}"; do
-    wait "$pid" || traffic_failed=1
+  for direction in uplink downlink; do
+    # Wait for each UE namespace to have a routable path to TRAFFIC_TARGET before
+    # starting its iperf3 client.  Route-waits run sequentially (they are fast in
+    # practice and order doesn't matter); iperf3 clients are then all backgrounded
+    # so every UE generates traffic simultaneously, producing concurrent load across
+    # all gNBs rather than sequential single-UE bursts.
+    iperf_pids=()
+    iperf_port_idx=0
+    for netns_name in "${UE_NAMESPACES[@]}"; do
+      wait_for_netns_route "$netns_name"
+      local_port=$(( IPERF_PORT + iperf_port_idx ))
+      if [[ "$direction" == "downlink" ]]; then
+        echo "Running reverse iperf3 from ${TRAFFIC_TARGET} to ${netns_name} for ${IPERF_DURATION_SECONDS}s (port ${local_port})..."
+        sudo -n ip netns exec "$netns_name" iperf3 -c "$TRAFFIC_TARGET" -R -t "$IPERF_DURATION_SECONDS" -p "$local_port" &
+      else
+        echo "Running iperf3 from ${netns_name} to ${TRAFFIC_TARGET} for ${IPERF_DURATION_SECONDS}s (port ${local_port})..."
+        sudo -n ip netns exec "$netns_name" iperf3 -c "$TRAFFIC_TARGET" -t "$IPERF_DURATION_SECONDS" -p "$local_port" &
+      fi
+      iperf_pids+=($!)
+      (( iperf_port_idx++ )) || true
+    done
+
+    for pid in "${iperf_pids[@]}"; do
+      wait "$pid" || traffic_failed=1
+    done
   done
 
   stop_iperf_servers

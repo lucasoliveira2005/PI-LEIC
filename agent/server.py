@@ -17,7 +17,18 @@ from agent import (
 AGENT_DIR = Path(__file__).parent
 REPO_ROOT = AGENT_DIR.parent
 METRICS_API_BASE = os.environ.get("METRICS_API_BASE", "http://localhost:8000")
-SOFTWARE_TYPE = os.environ.get("RAN_BACKEND", "srsran")
+
+
+def _normalize_backend(value: str) -> str:
+    backend = (value or "oai").strip().lower()
+    if backend in {"oai", "oran", "openairinterface"}:
+        return "oai"
+    if backend == "srsran":
+        return "srsran"
+    return "oai"
+
+
+SOFTWARE_TYPE = _normalize_backend(os.environ.get("RAN_BACKEND", "oai"))
 
 app = Flask(__name__, static_folder=str(AGENT_DIR))
 
@@ -60,15 +71,25 @@ def index():
 def chat():
     data = request.get_json(force=True)
     question = (data.get("question") or "").strip()
-    software = data.get("software", SOFTWARE_TYPE)
     if not question:
         return jsonify({"error": "empty question"}), 400
     try:
-        summary = build_network_summary(software)
+        summary = build_network_summary(SOFTWARE_TYPE)
         answer = ask_llm(summary, question)
-        return jsonify({"answer": answer})
+        return jsonify({"answer": answer, "backend": SOFTWARE_TYPE})
     except Exception as exc:
         return jsonify({"error": str(exc)}), 500
+
+
+@app.route("/api/config")
+def api_config():
+    return jsonify(
+        {
+            "backend": SOFTWARE_TYPE,
+            "backend_label": "OAI / ORAN" if SOFTWARE_TYPE == "oai" else "srsRAN",
+            "metrics_api_base": METRICS_API_BASE,
+        }
+    )
 
 
 @app.route("/api/health")

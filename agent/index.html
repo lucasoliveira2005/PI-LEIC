@@ -89,10 +89,11 @@
     }
     .chat-input-wrap:focus-within { border-color: var(--accent); }
 
-    .software-select {
+    .backend-chip {
       background: var(--surface2); border: 1px solid var(--border);
       color: var(--text); border-radius: 8px; padding: 4px 8px;
-      font-size: 13px; cursor: pointer; flex-shrink: 0; align-self: flex-end; margin-bottom: 2px;
+      font-size: 13px; flex-shrink: 0; align-self: flex-end; margin-bottom: 2px;
+      white-space: nowrap;
     }
 
     #chat-input {
@@ -176,10 +177,7 @@
   </div>
   <div class="chat-footer">
     <div class="chat-input-wrap">
-      <select class="software-select" id="software-select">
-        <option value="srsran">srsRAN</option>
-        <option value="oran">ORAN</option>
-      </select>
+      <span class="backend-chip" id="backend-chip">Backend: …</span>
       <textarea id="chat-input" rows="1" placeholder="Pergunta sobre a rede…"></textarea>
       <button id="send-btn" title="Enviar">
         <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round" stroke-linejoin="round">
@@ -247,7 +245,17 @@ document.querySelectorAll('.tab-btn').forEach(btn => {
 const messagesEl = document.getElementById('messages');
 const inputEl    = document.getElementById('chat-input');
 const sendBtn    = document.getElementById('send-btn');
-const softSel    = document.getElementById('software-select');
+const backendChip = document.getElementById('backend-chip');
+
+async function loadConfig() {
+  try {
+    const res = await fetch('/api/config');
+    const data = await res.json();
+    backendChip.textContent = 'Backend: ' + (data.backend_label || data.backend || 'desconhecido');
+  } catch (e) {
+    backendChip.textContent = 'Backend: desconhecido';
+  }
+}
 
 inputEl.addEventListener('input', () => {
   inputEl.style.height = 'auto';
@@ -295,7 +303,7 @@ async function sendMessage() {
     const res = await fetch('/chat', {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ question, software: softSel.value })
+      body: JSON.stringify({ question })
     });
     const data = await res.json();
     typing.remove();
@@ -312,6 +320,8 @@ async function sendMessage() {
 function escHtml(s) {
   return s.replace(/&/g,'&amp;').replace(/</g,'&lt;').replace(/>/g,'&gt;');
 }
+
+loadConfig();
 
 /* ═══════════════════════════════════════
    DASHBOARD
