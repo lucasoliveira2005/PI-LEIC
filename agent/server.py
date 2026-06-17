@@ -7,6 +7,7 @@ from flask import Flask, request, jsonify, send_from_directory
 import requests as http_requests
 
 sys.path.insert(0, str(Path(__file__).parent))
+sys.path.insert(0, str(Path(__file__).resolve().parent.parent / "src"))
 from agent import (
     build_network_summary,
     ask_llm,
@@ -15,10 +16,16 @@ from agent import (
     METRICS_JSON_PATH,
     ALERTS_JSON_PATH,
 )
+from collector.network_observation import network_observation_from_event
 
 AGENT_DIR = Path(__file__).parent
 REPO_ROOT = AGENT_DIR.parent
 METRICS_API_BASE = os.environ.get("METRICS_API_BASE", "http://localhost:8000")
+ORAN_METRICS_EVENT_PATHS = [
+    Path(os.environ.get("METRICS_OUT", "")),
+    REPO_ROOT / "metrics/oran/gnb_metrics.jsonl",
+    REPO_ROOT / "metrics/gnb_metrics.jsonl",
+]
 ORAN_AGENT_OBSERVATION_PATHS = [
     Path(os.environ.get("METRICS_AGENT_OUT", "")),
     REPO_ROOT / "metrics/oran/agent_network_observations.jsonl",
@@ -92,6 +99,70 @@ def _latest_jsonl(paths):
     return None
 
 
+def _recent_jsonl_lines(path, max_bytes=1024 * 1024):
+    if not path or not path.exists():
+        return []
+    try:
+        with path.open("rb") as handle:
+            handle.seek(0, os.SEEK_END)
+            size = handle.tell()
+            handle.seek(max(0, size - max_bytes))
+            return [
+                line.decode("utf-8")
+                for line in handle.read().splitlines()
+                if line.strip()
+            ]
+    except (OSError, UnicodeDecodeError):
+        return []
+
+
+def _latest_observations_by_source(paths):
+    by_source = {}
+    for path in paths:
+        for line in reversed(_recent_jsonl_lines(path)):
+            try:
+                event = json.loads(line)
+            except json.JSONDecodeError:
+                continue
+            source_id = event.get("source_id")
+            if not source_id or source_id in by_source:
+                continue
+            observation = network_observation_from_event(event)
+            if observation is not None:
+                by_source[source_id] = observation
+        if by_source:
+            break
+    return by_source
+
+
+def _merge_observations(observations):
+    observations = [item for item in observations if isinstance(item, dict)]
+    if not observations:
+        return None
+
+    latest_timestamp = None
+    cells = []
+    ues = []
+    for observation in observations:
+        cells.extend(observation.get("cells") or [])
+        ues.extend(observation.get("ues") or [])
+        timestamp = observation.get("timestamp")
+        if latest_timestamp is None:
+            latest_timestamp = timestamp
+            continue
+        if (_parse_epoch(timestamp) or 0) > (_parse_epoch(latest_timestamp) or 0):
+            latest_timestamp = timestamp
+
+    return {
+        "schema_version": "network-observation.v1",
+        "mode": "latest-local-snapshot",
+        "count": len(ues),
+        "timestamp": latest_timestamp,
+        "cells": cells,
+        "ues": ues,
+    }
+
+
 def _metrics_timestamp(payload):
     if not isinstance(payload, dict):
         return None
@@ -118,8 +189,9 @@ def _load_data(name: str):
     }
     live = _metrics_api_get(api_paths[name])
     if name == "metrics":
+        local_by_source = _merge_observations(_latest_observations_by_source(ORAN_METRICS_EVENT_PATHS).values())
         local_observation = _latest_jsonl(ORAN_AGENT_OBSERVATION_PATHS)
-        return _freshest_metrics_payload(live, local_observation)
+        return _freshest_metrics_payload(live, local_by_source, local_observation)
     if live is not None:
         return live
     try:

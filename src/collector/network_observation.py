@@ -317,7 +317,29 @@ def network_observation_from_event(event: Dict[str, Any]) -> Optional[Dict[str, 
     if not isinstance(payload, dict):
         return None
     timestamp = event.get("timestamp") or payload.get("timestamp") or event.get("collector_timestamp")
-    return network_observation_from_payload(payload, timestamp=timestamp)
+    observation = network_observation_from_payload(payload, timestamp=timestamp)
+    if observation is None:
+        return None
+
+    source_id = event.get("source_id")
+    if not source_id:
+        return observation
+
+    remap: Dict[str, str] = {}
+    for cell in observation.get("cells") or []:
+        cell_id = cell.get("cell_id")
+        if not isinstance(cell_id, str) or cell_id.startswith(f"{source_id}-"):
+            continue
+        qualified_cell_id = f"{source_id}-{cell_id}"
+        remap[cell_id] = qualified_cell_id
+        cell["cell_id"] = qualified_cell_id
+
+    for ue in observation.get("ues") or []:
+        cell_id = ue.get("cell_id")
+        if cell_id in remap:
+            ue["cell_id"] = remap[cell_id]
+
+    return observation
 
 
 class AgentObservationWriter:
