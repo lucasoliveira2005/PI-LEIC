@@ -609,10 +609,10 @@ def main():
         print(f"Network software: {software}")
         
         summary = build_network_summary(software)
-        
 
         print("\n================ NETWORK SUMMARY ================\n")
-        print(summary)
+        
+        #print(summary)
 
         # ----------------------------------------------------
         # INTERACTIVE LOOP
@@ -623,38 +623,20 @@ def main():
             print("\n=================================================\n")
 
             question = input(
-                "Agent commands:\n\n"
-                "exit -> to quit\n" \
-                "refresh -> to refresh summary\n\n" \
+                "\n"
+                "\n exit -> to quit\n" \
                 "Ask your question about the network: ")
 
             if not question.strip():
                 continue
 
-            if question.lower() in ["refresh"]:
-                print("\nRefreshing network summary...\n")
-                summary = build_network_summary(software)
-                print(summary)
-                continue
-
             if question.lower() in ["exit"]:
                 break
 
-            start_time = time.perf_counter()
             answer = ask_llm(summary, question)
-            elapsed_seconds = time.perf_counter() - start_time
-
-            # Format elapsed time as minutes and seconds
-            minutes = int(elapsed_seconds // 60)
-            seconds = elapsed_seconds % 60
-            if minutes:
-                time_str = f"{minutes}m {seconds:.3f}s"
-            else:
-                time_str = f"{seconds:.3f}s"
 
             print("\nLLM Response:\n")
             print(answer)
-            print(f"\nLLM response time: {time_str} ({elapsed_seconds:.3f} seconds)")
 
 
     except Exception as e:
