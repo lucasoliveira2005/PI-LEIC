@@ -173,6 +173,8 @@ def parse_health(data: dict) -> str:
 
         entities = source_data.get("entities", 0)
         age = source_data.get("last_sample_age_seconds", "unknown")
+        if isinstance(age, (int, float)):
+            age = f"{age:.1f}"
         fresh = source_data.get("fresh", False)
 
         lines.append(f"{source_name}:")
@@ -223,8 +225,8 @@ def parse_metrics(data: dict) -> str:
     lines.append("Cell Throughput:")
     for (src_id, c_idx), c_info in cells_data.items():
         lines.append(f"- {src_id} (Cell {c_idx}, PCI {c_info['pci']}):")
-        lines.append(f"  * cell_dl_throughput: {c_info['dl_throughput']} Mbps")
-        lines.append(f"  * cell_ul_throughput: {c_info['ul_throughput']} Mbps")
+        lines.append(f"  * cell_dl_throughput: {c_info['dl_throughput']:.2f} Mbps")
+        lines.append(f"  * cell_ul_throughput: {c_info['ul_throughput']:.2f} Mbps")
     lines.append("")
 
     # --------------------------------------------------------
@@ -255,14 +257,14 @@ def parse_metrics(data: dict) -> str:
             ul_mcs = ue_stats.get("ul_mcs", 0)
 
             lines.append(f"- {ue_id} via {src_id} (RNTI: {rnti}):")
-            lines.append(f"  * Throughput: DL {dl_brate} Mbps / UL {ul_brate} Mbps")
+            lines.append(f"  * Throughput: DL {dl_brate:.2f} Mbps / UL {ul_brate:.2f} Mbps")
             lines.append("  * Radio Frequency Metrics:")
-            lines.append(f"    + RSRP: {rsrp} dBm")
-            lines.append(f"    + SINR: {snr} dB")
+            lines.append(f"    + RSRP: {rsrp:.2f} dBm")
+            lines.append(f"    + SINR: {snr:.2f} dB")
             lines.append(f"    + CQI: {cqi}")
             lines.append("  * Efficiency & Radio Link Health:")
             lines.append(f"    + BLER: {bler:.2%}")
-            lines.append(f"    + TA: {ta} ns")
+            lines.append(f"    + TA: {ta:.2f} ns")
             lines.append(f"    + MCS: DL {dl_mcs} / UL {ul_mcs}")
             lines.append("")
 
@@ -356,7 +358,7 @@ def parse_oran_metrics(data: dict) -> str:
         if value is None:
             return "0.0"
 
-        return str(float(value))
+        return f"{float(value):.2f}"
 
     lines = []
 
