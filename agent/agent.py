@@ -568,19 +568,24 @@ def build_network_summary(software: str) -> str:
 def ask_llm(summary: str, question: str) -> str:
 
     prompt = f"""
-
 Segue abaixo o resumo atual da rede:
 
 {summary}
 
-Question:
+Pergunta:
 {question}
+
+Responde em Português Europeu (pt-PT), baseando-te apenas nos dados acima.
 """
 
     payload = {
         "model": MODEL_NAME,
         "prompt": prompt,
-        "stream": False
+        "stream": False,
+        "options": {
+            "num_ctx": 8192,
+            "temperature": 0.2,
+        },
     }
 
     response = requests.post(OLLAMA_URL, json=payload)
