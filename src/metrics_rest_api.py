@@ -46,7 +46,7 @@ LOG_FILE = Path(os.environ.get("METRICS_OUT", SCRIPT_DIR / "../metrics/gnb_metri
 LOG_INCLUDE_ROTATED = parse_bool_env("METRICS_LOG_INCLUDE_ROTATED", True)
 LOG_MAX_ARCHIVES = parse_non_negative_int_env("METRICS_LOG_MAX_ARCHIVES", 5)
 SQLITE_ENABLED = parse_bool_env("METRICS_SQLITE_ENABLED", True)
-SQLITE_PATH = Path(os.environ.get("METRICS_SQLITE_PATH", "/tmp/pi-leic-metrics.sqlite"))
+SQLITE_PATH = Path(os.environ.get("METRICS_SQLITE_PATH", str(SCRIPT_DIR / "../var/pi-leic-metrics.sqlite")))
 
 # Cap stale-source timeout: same defensive pattern as snapshot TTL.
 # A misconfigured 86400 would suppress stale-source alerts for 24 h.

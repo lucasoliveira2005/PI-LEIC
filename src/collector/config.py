@@ -35,7 +35,7 @@ ROTATE_MAX_BYTES: int = parse_non_negative_int_env("METRICS_ROTATE_MAX_BYTES", 5
 ROTATE_MAX_FILES: int = parse_non_negative_int_env("METRICS_ROTATE_MAX_FILES", 5)
 METRICS_SQLITE_ENABLED: bool = parse_bool_env("METRICS_SQLITE_ENABLED", True)
 METRICS_SQLITE_PATH: Path = Path(
-    os.environ.get("METRICS_SQLITE_PATH", "/tmp/pi-leic-metrics.sqlite")
+    os.environ.get("METRICS_SQLITE_PATH", str(_SRC_DIR / "../var/pi-leic-metrics.sqlite"))
 )
 RECONNECT_SECONDS: float = parse_non_negative_float_env("METRICS_RECONNECT_SECONDS", 3.0)
 METRICS_SQLITE_TIMEOUT_SECONDS: float = parse_non_negative_float_env(

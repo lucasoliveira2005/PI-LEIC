@@ -1,70 +1,66 @@
-# Mini guia: instalar Ollama e correr o agent.py
+# RANPilot — local-LLM agent (setup)
 
-## 1) Instalar o Ollama (Linux)
+RANPilot answers questions about the 5G network in natural language (PT-PT). It calls the
+REST API (`/health`, `/metrics`, `/alerts`), builds a **deterministic** technical summary in
+Python, then asks a **local Ollama model** to phrase/interpret it. The LLM never fetches the
+numbers itself (anti-hallucination), and never sees backend/transport details.
+
+## 1) Install Ollama (Linux)
 
 ```bash
 curl -fsSL https://ollama.com/install.sh | sh
-```
-
-Confirma a instalação:
-
-```bash
 ollama --version
 ```
 
-## 2) Iniciar o serviço do Ollama
+If the service doesn't start automatically: `ollama serve` (leave that terminal open).
 
-Em muitas instalações, o serviço arranca automaticamente. Se não arrancar, corre:
+## 2) Create the RANPilot model
 
-```bash
-ollama serve
-```
-
-Se usares este comando, deixa este terminal aberto.
-
-## 3) Descarregar o modelo usado pelo script
-
-O `agent.py` está configurado com o modelo `llama3`.
+The agent uses a **custom model named `RANPilot`**, built from [`Modelfile`](Modelfile)
+(`FROM llama3` + a PT-PT 5G/O-RAN system prompt).
 
 ```bash
-ollama pull llama3
+ollama pull llama3                      # base model
+ollama create RANPilot -f agent/Modelfile
+ollama run RANPilot                     # optional: test it in the terminal
 ```
 
-## 4) (Opcional) Ativar ambiente virtual Python
-
-Se já tens `.venv` criado no projeto:
+## 3) (Optional) activate the project venv
 
 ```bash
 source src/.venv/bin/activate
 ```
 
-## 5) Executar o agente
+The agent needs `flask` and `requests` (declared in the project `requirements.txt`).
+
+## 4) Run the agent
 
 ```bash
-python3 agent/agent.py
+python agent/agent.py
 ```
 
-## 6) Comandos dentro do agente
+This starts the Flask server and opens the **RANPilot web UI** at `http://localhost:5000`:
 
-- `/ajuda` mostra ajuda
-- `/rede` pede métricas e faz análise técnica
-- `/sair` termina o programa
+- **Chat** tab — type a question in natural language, e.g. *"Como está a rede?"* or
+  *"Há anomalias?"*. There are **no slash commands** — just ask in plain language.
+- **Dashboard** tab — live Chart.js graphs (DL/UL throughput, SINR, BLER) polling the REST
+  API every 2 s.
 
-## Erro comum
+The same terminal also runs an interactive CLI loop (type a question, or `exit` to quit).
 
-Se aparecer `comando 'ollama' não encontrado`:
+## Configuration
 
-1. Reabre o terminal.
-2. Confirma com `ollama --version`.
-3. Se necessário, adiciona o binário ao PATH e tenta novamente.
+| Variable | Default | Effect |
+| --- | --- | --- |
+| `RAN_BACKEND` | `oai` | Selects the metric parser (`oai` / `srsran`) |
+| `METRICS_API_BASE` | `http://localhost:8000` | REST API base URL the agent consumes |
+| `AGENT_UI_PORT` | `5000` | Web UI port |
 
----
+> Prerequisite: the REST API must be up (`bash src/launch_stack.sh`) and reachable at
+> `METRICS_API_BASE`. If the API is down, the agent falls back to the most recent local
+> observation files under `metrics/`.
 
-# Criação do modelo personalizado
+## Common error
 
-(dei o nome de RANPilot)
-
-ollama create RANPilot -f Modelfile
-
-ollama run RANPilot   //para testar no terminal
-
+`command 'ollama' not found` → reopen the terminal, confirm with `ollama --version`, and add
+the binary to `PATH` if needed.
